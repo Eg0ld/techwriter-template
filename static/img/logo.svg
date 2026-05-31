@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="Documentation logo">
+  <rect x="2" y="2" width="28" height="28" rx="6" fill="#2563eb"/>
+  <path d="M10 9h9a3 3 0 0 1 3 3v11h-9a3 3 0 0 0-3 1.6V9z" fill="#ffffff" opacity="0.95"/>
+  <path d="M10 9v15.6A3 3 0 0 1 13 23h-3V9z" fill="#ffffff" opacity="0.6"/>
+  <rect x="12.5" y="12.5" width="7" height="1.6" rx="0.8" fill="#2563eb"/>
+  <rect x="12.5" y="15.6" width="7" height="1.6" rx="0.8" fill="#2563eb"/>
+  <rect x="12.5" y="18.7" width="4.5" height="1.6" rx="0.8" fill="#2563eb"/>
+</svg>

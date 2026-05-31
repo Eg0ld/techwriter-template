@@ -1,0 +1,193 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# techwriter.ai — Initial documentation build
+#
+# Manual (workflow_dispatch) one-time job. Clones the WATCHED repo (the code we
+# document), runs Claude Code headless to survey it and write the initial
+# Docusaurus content tree (/docs/**.md(x) + _category_.json), then opens a PR
+# titled "📚 Initial documentation" for the owner to review and merge.
+#
+# State model (GitHub-native, see PLATFORM-SPEC §7):
+#   • .autoscribe/config.json  — watched repo + docs dir + model/budget config
+#   • .autoscribe/prompts/init.md — the ported "initial build" agent prompt
+#   • The PR is the review UI. Nothing is hosted off-GitHub.
+#
+# Cost note: the initial build is the single most expensive run (it reads the
+# whole repo and fans out one section at a time). It runs on the OWNER'S
+# Anthropic key. We default to Opus only here (deep one-shot); per-PR sync uses
+# Sonnet. --max-turns caps runaway loops.
+# ─────────────────────────────────────────────────────────────────────────────
+name: techwriter.ai · Initial docs
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Generate docs and upload as an artifact, but do not open a PR"
+        type: boolean
+        default: false
+
+# One initial build at a time per docs repo.
+concurrency:
+  group: autoscribe-init
+  cancel-in-progress: false
+
+permissions:
+  contents: write       # create the autoscribe/initial-docs branch + commit
+  pull-requests: write  # open the "📚 Initial documentation" PR
+
+jobs:
+  build-initial-docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      DOCS_BRANCH: autoscribe/initial-docs
+    steps:
+      # 1) Check out THIS docs repo (where the generated /docs land).
+      - name: Checkout docs repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0   # full history so we can branch + push cleanly
+
+      # 2) Read .autoscribe/config.json to learn the watched repo + docs dir.
+      #    config.json shape (written at scaffold time by the control plane):
+      #    { "watchedRepo": "kibook/s1kd-tools", "docsDir": "docs",
+      #      "model": "sonnet", "initModel": "opus", "waveSize": 8,
+      #      "spendCeilingUSD": 10 }
+      #    The initial build uses initModel (Opus by default). maxTurns defaults
+      #    to 200 here as a runaway-loop cap (config may override via .maxTurns).
+      - name: Read techwriter.ai config
+        id: cfg
+        run: |
+          set -euo pipefail
+          CFG=.autoscribe/config.json
+          test -f "$CFG" || { echo "::error::Missing $CFG"; exit 1; }
+          WATCHED=$(jq -r '.watchedRepo' "$CFG")
+          DOCS_DIR=$(jq -r '.docsDir // "docs"' "$CFG")
+          INIT_MODEL=$(jq -r '.initModel // "opus"' "$CFG")
+          MAX_TURNS=$(jq -r '.maxTurns // 200' "$CFG")
+          test "$WATCHED" != "null" && test "$WATCHED" != "owner/name" \
+            || { echo "::error::config.json watchedRepo not configured"; exit 1; }
+          {
+            echo "watched=$WATCHED"
+            echo "docs_dir=$DOCS_DIR"
+            echo "init_model=$INIT_MODEL"
+            echo "max_turns=$MAX_TURNS"
+          } >> "$GITHUB_OUTPUT"
+          echo "Watched repo: $WATCHED · docs dir: $DOCS_DIR · model: $INIT_MODEL"
+
+      # 3) Shallow-clone the watched repo into ./.watched (read-only source).
+      #    Shallow because the agent only needs the current tree, not history.
+      - name: Clone watched repo (shallow)
+        run: |
+          set -euo pipefail
+          gh repo clone "${{ steps.cfg.outputs.watched }}" .watched -- --depth 1
+          echo "Cloned ${{ steps.cfg.outputs.watched }} @ $(git -C .watched rev-parse --short HEAD)"
+
+      # 4) Node toolchain (Docusaurus needs Node 20+; we also run the CLI here).
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 20
+
+      # 5) Install the Claude Code CLI (the agent runtime).
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      # 6) Run the agent headless.
+      #    - The system-prompt file (.autoscribe/prompts/init.md) carries the
+      #      ported "initial build" intelligence: survey → propose sidebar IA →
+      #      fan out one section at a time → editorial pass.
+      #    - --add-dir grants read access to the cloned watched repo.
+      #    - bypassPermissions is safe: this is an isolated, ephemeral CI runner.
+      #    - We pass the watched-repo path and docs dir in the turn prompt.
+      - name: Generate initial docs
+        env:
+          WATCHED_PATH: ${{ github.workspace }}/.watched
+          DOCS_DIR: ${{ steps.cfg.outputs.docs_dir }}
+          WATCHED_REPO: ${{ steps.cfg.outputs.watched }}
+        run: |
+          set -euo pipefail
+          WATCHED_SHA=$(git -C .watched rev-parse HEAD)
+          claude -p "Build the initial documentation site.
+
+          Watched repository: $WATCHED_REPO (commit $WATCHED_SHA)
+          Watched source is cloned READ-ONLY at: $WATCHED_PATH
+          Write all Docusaurus content into: ./$DOCS_DIR
+
+          Survey the watched repo, propose a sidebar information architecture, then
+          write Markdown/MDX pages plus _category_.json files for each section. Add
+          a provenance line to each page noting it was generated from $WATCHED_REPO
+          at $WATCHED_SHA. Do not modify anything under $WATCHED_PATH." \
+            --append-system-prompt-file .autoscribe/prompts/init.md \
+            --add-dir "$WATCHED_PATH" \
+            --model "${{ steps.cfg.outputs.init_model }}" \
+            --permission-mode bypassPermissions \
+            --allowedTools "Read" "Write" "Edit" "Glob" "Grep" "Bash(ls *)" "Bash(find *)" "Bash(cat *)" \
+            --max-turns "${{ steps.cfg.outputs.max_turns }}" \
+            --output-format json \
+            | tee /tmp/init-result.json
+
+      # 7) Open the PR (skipped on dry runs). gh pr create handles the branch
+      #    push + PR open. We keep the watched clone out of the commit.
+      - name: Commit and open PR
+        if: ${{ inputs.dry_run == false }}
+        run: |
+          set -euo pipefail
+          git config user.name  "autoscribe[bot]"
+          git config user.email "autoscribe[bot]@users.noreply.github.com"
+
+          git checkout -b "$DOCS_BRANCH"
+          # Never commit the read-only watched clone or transient agent files.
+          echo ".watched/" >> .git/info/exclude
+          git add "${{ steps.cfg.outputs.docs_dir }}" .autoscribe/
+          if git diff --cached --quiet; then
+            echo "::warning::Agent produced no changes — nothing to open a PR for."
+            exit 0
+          fi
+
+          git commit -m "📚 Initial documentation
+
+          Generated by techwriter.ai from ${{ steps.cfg.outputs.watched }}.
+
+          Co-Authored-By: autoscribe[bot] <autoscribe[bot]@users.noreply.github.com>"
+          git push --set-upstream origin "$DOCS_BRANCH" --force-with-lease
+
+          # Build the PR body in a file (heredoc is NOT indented so the markdown
+          # isn't swallowed into a code block). Backticks are written via a shell
+          # variable so they survive the literal quoted heredoc.
+          BT='`'
+          cat > /tmp/pr-body.md <<EOF
+          ## Initial documentation build
+
+          techwriter.ai surveyed the watched repository and generated the initial
+          Docusaurus content tree (pages, categories, and sidebar structure).
+
+          - **Source:** ${BT}${{ steps.cfg.outputs.watched }}${BT}
+          - **Review:** this PR diff is the review surface. Edit any page directly
+            on this branch, then **merge** to publish. GitHub Pages redeploys on
+            merge to ${BT}main${BT}.
+
+          _Opened automatically by the techwriter.ai initial-build workflow._
+          EOF
+          # Strip the YAML indentation that leads each body line.
+          sed -i 's/^          //' /tmp/pr-body.md
+
+          gh pr create \
+            --title "📚 Initial documentation" \
+            --body-file /tmp/pr-body.md \
+            --base main \
+            --head "$DOCS_BRANCH" \
+            || echo "::warning::PR may already exist for $DOCS_BRANCH — pushed commits instead."
+
+      # 8) On dry runs (or always, as a backup), keep the generated tree as an
+      #    artifact so the owner can inspect before any PR exists.
+      - name: Upload generated docs (dry-run / backup)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        continue-on-error: true
+        with:
+          name: autoscribe-init-preview
+          path: ${{ steps.cfg.outputs.docs_dir }}
+          retention-days: 7

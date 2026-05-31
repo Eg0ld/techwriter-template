@@ -1,0 +1,279 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# techwriter.ai — Per-PR documentation sync
+#
+# Fired by repository_dispatch (event_type: autoscribe-sync) when a PR merges in
+# the WATCHED repo. The control plane's GitHub App receives the watched repo's
+# pull_request webhook and re-dispatches it here with:
+#
+#   client_payload: { repo, pr, title, diff_url }
+#
+# Also runnable manually (workflow_dispatch) for backfill / debugging.
+#
+# What it does (ported from the reference PR-gap pipeline, analyze.md):
+#   1. Fetch the merged PR diff.
+#   2. Run Claude Code with .autoscribe/prompts/analyze.md to CLASSIFY the gap
+#      (NO_GAP | MISSING_CONTENT | OUTDATED_CONTENT | NEW_PAGE | STRUCTURAL |
+#      STYLE) and, when there is a gap, EDIT the relevant markdown in ./docs.
+#   3. NO_GAP fast-path → record + stop (cheap, common; one Sonnet call).
+#   4. Otherwise push commits onto the rolling branch autoscribe/updates and
+#      ensure an OPEN DRAFT PR exists (the draft accumulates across many source
+#      PRs — this is the reference's "drafts converge across PRs" behavior, but
+#      GitHub-native).
+#   5. Append a run-log entry to .autoscribe/state.json.
+#
+# Guardrails (it's the OWNER'S Anthropic key):
+#   • concurrency group serializes syncs so they never race the rolling branch.
+#   • Sonnet default for per-PR work; --max-turns caps cost.
+#   • NO_GAP path keeps trivial PRs to ~one cheap call (wave/cost discipline
+#     inherited from the reference's wave-based concurrency model).
+# ─────────────────────────────────────────────────────────────────────────────
+name: techwriter.ai · Sync
+
+on:
+  repository_dispatch:
+    types: [autoscribe-sync]
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Watched repo (owner/name) — defaults to config.json"
+        required: false
+      pr:
+        description: "Merged PR number in the watched repo"
+        required: true
+      title:
+        description: "PR title (for the run log / draft body)"
+        required: false
+      diff_url:
+        description: "Diff URL (optional; we refetch via gh api by default)"
+        required: false
+
+# Serialize all syncs: every run pushes onto the same rolling branch, so they
+# MUST NOT overlap. We do not cancel in-progress runs — each PR's analysis
+# should finish and commit before the next begins.
+concurrency:
+  group: autoscribe-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write       # push to the autoscribe/updates rolling branch + state.json
+  pull-requests: write  # create / maintain the draft PR
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      UPDATES_BRANCH: autoscribe/updates
+      # Normalize inputs from either trigger into one set of vars.
+      IN_REPO: ${{ github.event.client_payload.repo || inputs.repo }}
+      IN_PR: ${{ github.event.client_payload.pr || inputs.pr }}
+      IN_TITLE: ${{ github.event.client_payload.title || inputs.title }}
+      IN_DIFF_URL: ${{ github.event.client_payload.diff_url || inputs.diff_url }}
+    steps:
+      # 1) Check out THIS docs repo (full history → we branch + push the draft).
+      - name: Checkout docs repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      # 2) Read config (watched repo fallback + per-PR model + turn cap).
+      - name: Read techwriter.ai config
+        id: cfg
+        run: |
+          set -euo pipefail
+          CFG=.autoscribe/config.json
+          test -f "$CFG" || { echo "::error::Missing $CFG"; exit 1; }
+          WATCHED="${IN_REPO:-$(jq -r '.watchedRepo' "$CFG")}"
+          DOCS_DIR=$(jq -r '.docsDir // "docs"' "$CFG")
+          # Per-PR work uses the default model (Sonnet); maxTurns caps cost.
+          SYNC_MODEL=$(jq -r '.model // "sonnet"' "$CFG")
+          MAX_TURNS=$(jq -r '.maxTurns // 40' "$CFG")
+          {
+            echo "watched=$WATCHED"
+            echo "docs_dir=$DOCS_DIR"
+            echo "sync_model=$SYNC_MODEL"
+            echo "max_turns=$MAX_TURNS"
+          } >> "$GITHUB_OUTPUT"
+
+      # 3) Fetch the merged PR diff from the watched repo via gh api.
+      #    (We refetch rather than trusting diff_url so it works with private
+      #    watched repos under the same token; client_payload.diff_url is kept
+      #    only for the run log / human reference.)
+      - name: Fetch PR diff
+        id: diff
+        run: |
+          set -euo pipefail
+          test -n "${IN_PR:-}" || { echo "::error::No PR number provided"; exit 1; }
+          gh api "repos/${{ steps.cfg.outputs.watched }}/pulls/${IN_PR}" \
+            -H "Accept: application/vnd.github.v3.diff" > /tmp/pr.diff
+          BYTES=$(wc -c < /tmp/pr.diff | tr -d ' ')
+          echo "Fetched diff for ${{ steps.cfg.outputs.watched }}#${IN_PR} ($BYTES bytes)"
+          echo "bytes=$BYTES" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 20
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      # 4) Work on the rolling branch so the agent edits the draft's working tree.
+      #    Reuse autoscribe/updates if it exists (the draft accumulates); else
+      #    branch from the current main.
+      - name: Check out rolling updates branch
+        run: |
+          set -euo pipefail
+          git config user.name  "autoscribe[bot]"
+          git config user.email "autoscribe[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin "$UPDATES_BRANCH" >/dev/null 2>&1; then
+            git fetch origin "$UPDATES_BRANCH"
+            git checkout -B "$UPDATES_BRANCH" "origin/$UPDATES_BRANCH"
+            echo "Reusing existing rolling branch $UPDATES_BRANCH"
+          else
+            git checkout -B "$UPDATES_BRANCH"
+            echo "Created rolling branch $UPDATES_BRANCH"
+          fi
+
+      # 5) Run the agent. analyze.md (ported) tells it to classify the gap and,
+      #    if there is one, locate + edit the markdown under ./docs (and update
+      #    the sidebar / _category_.json for NEW_PAGE / STRUCTURAL). The diff is
+      #    on disk at /tmp/pr.diff; we hand the agent its path + the PR metadata.
+      #    We also ask it to write a machine-readable classification to
+      #    /tmp/autoscribe-classification.json for the run log.
+      - name: Analyze PR and edit docs
+        env:
+          DOCS_DIR: ${{ steps.cfg.outputs.docs_dir }}
+          WATCHED_REPO: ${{ steps.cfg.outputs.watched }}
+        run: |
+          set -euo pipefail
+          claude -p "A pull request just merged in the watched repository. Decide whether it changes the documentation, and if so, edit the affected pages.
+
+          Watched repository: $WATCHED_REPO
+          Merged PR: #${IN_PR}
+          PR title: ${IN_TITLE:-(none provided)}
+          Unified diff is on disk at: /tmp/pr.diff
+          Documentation root to edit: ./$DOCS_DIR
+
+          Classify the gap as one of NO_GAP | MISSING_CONTENT | OUTDATED_CONTENT |
+          NEW_PAGE | STRUCTURAL | STYLE. If NO_GAP, make NO file changes. Otherwise
+          locate the relevant markdown under ./$DOCS_DIR and edit it (for NEW_PAGE,
+          also create the page and update its _category_.json / sidebar entry).
+          Add a provenance note referencing $WATCHED_REPO PR #${IN_PR}.
+
+          Finally, write your decision as JSON to /tmp/autoscribe-classification.json:
+          {\"gap_type\":\"...\",\"severity\":\"low|medium|high\",\"pages\":[\"...\"],\"summary\":\"one line\"}" \
+            --append-system-prompt-file .autoscribe/prompts/analyze.md \
+            --model "${{ steps.cfg.outputs.sync_model }}" \
+            --permission-mode bypassPermissions \
+            --allowedTools "Read" "Write" "Edit" "Glob" "Grep" "Bash(cat /tmp/pr.diff)" "Bash(ls *)" "Bash(find *)" \
+            --max-turns "${{ steps.cfg.outputs.max_turns }}" \
+            --output-format json \
+            | tee /tmp/sync-result.json
+
+      # 6) Update .autoscribe/state.json — the GitHub-native replacement for the
+      #    reference's runLogs / PR-queue tables (schema: .autoscribe/state.schema.json).
+      #    We advance cursor.lastProcessedPr, upsert this PR's queue entry with the
+      #    right lifecycle status, and append one runLog entry.
+      - name: Update techwriter.ai state
+        id: state
+        run: |
+          set -euo pipefail
+          STATE=.autoscribe/state.json
+          test -f "$STATE" || echo '{"version":1,"cursor":{"lastProcessedPr":null},"queue":[],"runLog":[]}' > "$STATE"
+
+          # Read the agent's classification; default to NO_GAP if it wrote nothing.
+          GAP=$(jq -r '.gap_type // "NO_GAP"' /tmp/autoscribe-classification.json 2>/dev/null || echo NO_GAP)
+          case "$GAP" in
+            MISSING_CONTENT|OUTDATED_CONTENT|NEW_PAGE|STRUCTURAL|STYLE|NO_GAP) ;;
+            *) GAP=NO_GAP ;;   # clamp to the schema enum
+          esac
+          echo "gap=$GAP" >> "$GITHUB_OUTPUT"
+
+          # Lifecycle: no_gap (cheap path) vs drafted (edits landed on the draft).
+          if [ "$GAP" = "NO_GAP" ]; then STATUS=no_gap; GAPS=0; else STATUS=drafted; GAPS=1; fi
+          ID="${{ steps.cfg.outputs.watched }}#${IN_PR}"
+          TS="$(date -u +%FT%TZ)"
+          RUN_ID="${{ github.run_id }}-${{ github.run_attempt }}"
+
+          jq \
+            --argjson pr "${IN_PR}" \
+            --arg id "$ID" \
+            --arg status "$STATUS" \
+            --arg gap "$GAP" \
+            --arg ts "$TS" \
+            --arg runId "$RUN_ID" \
+            --argjson gaps "$GAPS" \
+            '.version = (.version // 1)
+             | .cursor.lastProcessedPr = ([(.cursor.lastProcessedPr // 0), $pr] | max)
+             | .cursor.lastProcessedMergedAt = $ts
+             # upsert the queue entry for this PR (replace any prior entry with same id)
+             | .queue = ((.queue // []) | map(select(.id != $id)))
+                        + [{id:$id, status:$status, gapType:$gap, updatedAt:$ts}]
+             | .runLog += [{runId:$runId, prsAnalyzed:1, gapsFound:$gaps,
+                            docsChanged:0, errors:0, at:$ts}]' \
+            "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+
+      # 7a) NO_GAP fast-path: just commit the advanced cursor/run-log and stop.
+      #     No draft PR churn for trivial PRs.
+      - name: Commit state only (NO_GAP)
+        if: ${{ steps.state.outputs.gap == 'NO_GAP' }}
+        run: |
+          set -euo pipefail
+          git add .autoscribe/state.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(autoscribe): no doc gap for ${{ steps.cfg.outputs.watched }}#${IN_PR}"
+            git push origin "$UPDATES_BRANCH"
+          fi
+          echo "NO_GAP — docs unchanged for PR #${IN_PR}."
+
+      # 7b) Gap path: commit doc edits + state, push onto the rolling branch,
+      #     and ensure an OPEN DRAFT PR exists (create with --draft if absent,
+      #     otherwise the push above already updated it).
+      - name: Commit edits and ensure draft PR
+        if: ${{ steps.state.outputs.gap != 'NO_GAP' }}
+        run: |
+          set -euo pipefail
+          git add "${{ steps.cfg.outputs.docs_dir }}" .autoscribe/
+          if git diff --cached --quiet; then
+            echo "::warning::Gap classified ${{ steps.state.outputs.gap }} but agent made no edits."
+            exit 0
+          fi
+          git commit -m "docs(autoscribe): sync from ${{ steps.cfg.outputs.watched }}#${IN_PR}
+
+          ${IN_TITLE:-}
+
+          Gap: ${{ steps.state.outputs.gap }}"
+          git push origin "$UPDATES_BRANCH"
+
+          # Open the rolling draft PR only if one isn't already open.
+          if [ -z "$(gh pr list --head "$UPDATES_BRANCH" --state open --json number --jq '.[0].number')" ]; then
+            # Body via file: heredoc is unindented (then de-indented by sed) so
+            # the markdown renders; backticks come from a var to survive quoting.
+            BT='`'
+            cat > /tmp/draft-body.md <<EOF
+          ## Rolling documentation updates
+
+          techwriter.ai maintains this **draft** PR. Each merged PR in the watched
+          repository that affects the docs adds commits here. The draft accumulates
+          changes across many source PRs.
+
+          When you are satisfied, click **Ready for review** and merge — GitHub
+          Pages redeploys on merge to ${BT}main${BT}. Review the **Files changed**
+          tab; per-commit messages link each change to its source PR.
+
+          _Maintained automatically by the techwriter.ai sync workflow._
+          EOF
+            sed -i 's/^          //' /tmp/draft-body.md
+            gh pr create \
+              --draft \
+              --title "✍️ Documentation updates" \
+              --body-file /tmp/draft-body.md \
+              --base main \
+              --head "$UPDATES_BRANCH"
+            echo "Opened rolling draft PR for $UPDATES_BRANCH."
+          else
+            echo "Rolling draft PR already open — pushed commits to it."
+          fi

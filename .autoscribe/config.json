@@ -1,0 +1,13 @@
+{
+  "$schema": "./config.schema.json",
+  "watchedRepo": "owner/name",
+  "docsDir": "docs",
+  "style": {
+    "voice": "plain technical English",
+    "audience": "developer"
+  },
+  "model": "sonnet",
+  "initModel": "opus",
+  "waveSize": 8,
+  "spendCeilingUSD": 10
+}

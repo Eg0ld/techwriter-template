@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autoscribe.dev/schemas/config.schema.json",
+  "title": "Autoscribe Config",
+  "description": "Committed configuration for an Autoscribe docs site. Lives at `.autoscribe/config.json` in the docs (tenant) repo and travels with the project. Holds NO secrets — the Anthropic API key is a GitHub repo secret (ANTHROPIC_API_KEY), never stored here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["watchedRepo", "docsDir"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional pointer to this schema for editor IntelliSense."
+    },
+    "watchedRepo": {
+      "type": "string",
+      "description": "The code repository Autoscribe documents and watches for merged PRs, in `owner/name` form. One watched repo per docs site (1:1 for the MVP).",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+      "examples": ["kibook/s1kd-tools", "owner/name"]
+    },
+    "docsDir": {
+      "type": "string",
+      "description": "Directory in THIS docs repo where Docusaurus markdown/MDX content lives. Autoscribe writes and edits files only under this path (plus `sidebars.ts`).",
+      "default": "docs",
+      "minLength": 1,
+      "examples": ["docs", "documentation"]
+    },
+    "style": {
+      "type": "object",
+      "description": "House-style hints handed to the editorial pass and the per-PR analyst so generated prose is consistent.",
+      "additionalProperties": false,
+      "properties": {
+        "voice": {
+          "type": "string",
+          "description": "Desired writing voice / tone for generated docs.",
+          "default": "plain technical English",
+          "examples": ["plain technical English", "friendly and concise"]
+        },
+        "audience": {
+          "type": "string",
+          "description": "Primary reader the docs are written for. Steers depth and vocabulary.",
+          "default": "developer",
+          "examples": ["developer", "end-user", "admin", "all"]
+        }
+      }
+    },
+    "model": {
+      "type": "string",
+      "description": "Claude model alias used for per-PR sync work (the common, cost-sensitive path). Sonnet is the conservative default.",
+      "default": "sonnet",
+      "examples": ["sonnet", "opus", "haiku"]
+    },
+    "initModel": {
+      "type": "string",
+      "description": "Claude model alias used only for the one-time initial full-repo build (`autoscribe-init`), where extra capability is worth the cost.",
+      "default": "opus",
+      "examples": ["opus", "sonnet"]
+    },
+    "waveSize": {
+      "type": "integer",
+      "description": "Maximum number of parallel sub-agents per wave during fan-out (e.g. the initial build's one-section-per-agent pass). Caps concurrency to keep cost and rate-limit pressure predictable. Ported from the reference pipeline's wave-based concurrency guard.",
+      "default": 8,
+      "minimum": 1,
+      "maximum": 15
+    },
+    "spendCeilingUSD": {
+      "type": "number",
+      "description": "Soft spend ceiling, in USD, for a single Action run. When the runner's estimated/observed spend for a run would exceed this, it stops early and records the breach instead of continuing. Because it is the user's own Anthropic key, this is a guardrail against runaway bills.",
+      "default": 10,
+      "exclusiveMinimum": 0
+    }
+  }
+}

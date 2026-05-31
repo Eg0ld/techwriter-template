@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autoscribe.dev/schemas/state.schema.json",
+  "title": "Autoscribe Runtime State",
+  "description": "GitHub-native runtime state for an Autoscribe docs site, committed at `.autoscribe/state.json` in the docs repo. This is the ONLY persistent state Autoscribe keeps — there is no database. Git history is the free, auditable timeline of every run. The Action has write access and rewrites this file at the end of each run.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["cursor", "queue", "runLog"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional pointer to this schema for editor IntelliSense."
+    },
+    "version": {
+      "type": "integer",
+      "description": "State file format version, for forward-compatible migrations.",
+      "default": 1,
+      "minimum": 1
+    },
+    "cursor": {
+      "type": "object",
+      "description": "High-water mark of progress through the watched repo's merged PRs. The scheduled-poll fallback uses this to find newly-merged PRs since the last run; the webhook-dispatch path advances it as PRs are processed.",
+      "additionalProperties": false,
+      "required": ["lastProcessedPr"],
+      "properties": {
+        "lastProcessedPr": {
+          "type": ["integer", "null"],
+          "description": "PR number of the most recently processed merged PR in the watched repo. `null` before the first run.",
+          "minimum": 0
+        },
+        "lastProcessedMergedAt": {
+          "type": ["string", "null"],
+          "description": "`merged_at` timestamp (ISO 8601, UTC) of the most recently processed PR. Used as the poll lower-bound so PRs merged out of numeric order are not missed.",
+          "format": "date-time"
+        }
+      }
+    },
+    "queue": {
+      "type": "array",
+      "description": "Work queue: one entry per merged watched-repo PR awaiting or undergoing processing. Mirrors the reference pipeline's per-PR queue. Processed terminal entries may be pruned to keep the file small (the runLog retains the audit trail).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable PR identifier in `owner/name#number` form.",
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+$",
+            "examples": ["owner/name#129"]
+          },
+          "status": {
+            "type": "string",
+            "description": "Lifecycle state of this PR's documentation work. Lifecycle: queued -> in_progress -> no_gap | drafted | published. `queued` = waiting; `in_progress` = being analyzed/edited this run; `no_gap` = analyzed, no doc change needed (cheap common path); `drafted` = doc edits committed to the rolling Draft PR branch, awaiting human review; `published` = the doc-update PR was merged.",
+            "enum": ["queued", "in_progress", "no_gap", "drafted", "published"]
+          },
+          "gapType": {
+            "type": "string",
+            "description": "Optional classification from the analyze pass, retained for the dashboard feed. Ported from the reference's findings taxonomy.",
+            "enum": ["MISSING_CONTENT", "OUTDATED_CONTENT", "NEW_PAGE", "STRUCTURAL", "STYLE", "NO_GAP"]
+          },
+          "docPr": {
+            "type": ["integer", "null"],
+            "description": "Number of the doc-update PR (in THIS docs repo) this work landed in, once drafted/published.",
+            "minimum": 0
+          },
+          "updatedAt": {
+            "type": "string",
+            "description": "ISO 8601 timestamp of the last status change for this entry.",
+            "format": "date-time"
+          }
+        }
+      }
+    },
+    "runLog": {
+      "type": "array",
+      "description": "Append-only log of Action runs. Becomes the user's dashboard feed. Ported from the reference pipeline's runLogs table.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["runId", "prsAnalyzed", "gapsFound", "docsChanged", "errors", "at"],
+        "properties": {
+          "runId": {
+            "type": "string",
+            "description": "Unique identifier for this run (e.g. timestamp + short random suffix, or the GitHub Actions run id)."
+          },
+          "prsAnalyzed": {
+            "type": "integer",
+            "description": "How many PRs the run classified.",
+            "minimum": 0
+          },
+          "gapsFound": {
+            "type": "integer",
+            "description": "How many of those PRs were classified as a documentation gap (status drafted/published rather than no_gap).",
+            "minimum": 0
+          },
+          "docsChanged": {
+            "type": "integer",
+            "description": "How many markdown/MDX files the run created or edited.",
+            "minimum": 0
+          },
+          "errors": {
+            "type": "integer",
+            "description": "Count of errors encountered during the run.",
+            "minimum": 0
+          },
+          "spendUSD": {
+            "type": "number",
+            "description": "Optional observed/estimated Anthropic spend for this run, in USD. Compared against config.spendCeilingUSD.",
+            "minimum": 0
+          },
+          "stoppedReason": {
+            "type": "string",
+            "description": "Optional reason the run ended early, if it did.",
+            "enum": ["spend_ceiling", "wave_cap", "error", "no_work"]
+          },
+          "at": {
+            "type": "string",
+            "description": "ISO 8601 timestamp when the run finished.",
+            "format": "date-time"
+          }
+        }
+      }
+    }
+  }
+}

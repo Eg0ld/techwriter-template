@@ -1,0 +1,21 @@
+{
+  "$schema": "./state.schema.json",
+  "version": 1,
+  "cursor": {
+    "lastProcessedPr": 128,
+    "lastProcessedMergedAt": "2026-05-28T12:00:00Z"
+  },
+  "queue": [
+    { "id": "owner/name#129", "status": "queued" }
+  ],
+  "runLog": [
+    {
+      "runId": "2026-05-28T12-04-00Z-7f3a1c",
+      "prsAnalyzed": 3,
+      "gapsFound": 1,
+      "docsChanged": 2,
+      "errors": 0,
+      "at": "2026-05-28T12:04:00Z"
+    }
+  ]
+}
