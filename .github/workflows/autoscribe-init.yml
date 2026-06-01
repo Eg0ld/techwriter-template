@@ -41,7 +41,7 @@ jobs:
     timeout-minutes: 60
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.WATCHED_REPO_TOKEN || secrets.GITHUB_TOKEN }}
       DOCS_BRANCH: autoscribe/initial-docs
     steps:
       # 1) Check out THIS docs repo (where the generated /docs land).

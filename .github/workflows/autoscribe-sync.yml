@@ -64,7 +64,7 @@ jobs:
     timeout-minutes: 30
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.WATCHED_REPO_TOKEN || secrets.GITHUB_TOKEN }}
       UPDATES_BRANCH: autoscribe/updates
       # Normalize inputs from either trigger into one set of vars.
       IN_REPO: ${{ github.event.client_payload.repo || inputs.repo }}
