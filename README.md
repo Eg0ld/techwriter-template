@@ -1,8 +1,8 @@
-# techwriter.ai — tenant docs repo
+# Autoscribe — tenant docs repo
 
 > **This is your own, self-contained project.** This repository is a complete,
 > **blank** [Docusaurus](https://docusaurus.io/) starter that ships with the
-> techwriter.ai engine wired in. The **"Make it your own"** flow creates a *fresh
+> Autoscribe engine wired in. The **"Make it your own"** flow creates a *fresh
 > repository from this template* in **your** account — it does **not** fork the
 > techwriter.ai showcase or point back at it. From the moment it's created, you own
 > everything in it: the docs, the config, the theme, the history. The showcase
@@ -35,7 +35,7 @@ Two halves that work together, side by side in this one repo:
    whatever you want with** — rename it, restyle it, delete the placeholder page,
    write pages by hand. Nothing here is special or off-limits.
 
-2. **The techwriter.ai engine** (the part that fills it in). The `.github/workflows`
+2. **The Autoscribe engine** (the part that fills it in). The `.github/workflows`
    and `.autoscribe/` directories below. You tell it which code repo to watch in
    [`.autoscribe/config.json`](#configuring-autoscribeconfigjson), and over time
    it writes pages into the blank `docs/` folder and keeps them in sync — opening
@@ -43,7 +43,7 @@ Two halves that work together, side by side in this one repo:
    yourself too;** the agent and your own edits coexist in the same `docs/` tree.
 
 The two halves are independent: the site builds and deploys even before
-techwriter.ai has written anything, and you can hand-author the whole thing and
+Autoscribe has written anything, and you can hand-author the whole thing and
 never run the agent if you prefer.
 
 You — the repo owner — never have to write the docs by hand. You review and
@@ -183,7 +183,7 @@ site go live a minute or two after you click **Merge**.
 
 The reference pipeline this was ported from accumulated in-progress edits in a
 SQLite **`drafts` table** and reviewed them in a bespoke inline-diff web app.
-techwriter.ai **replaces both with native GitHub primitives**:
+Autoscribe **replaces both with native GitHub primitives**:
 
 - **One rolling branch — `autoscribe/updates`.** `autoscribe-sync` never opens a
   fresh PR per watched-repo PR. It pushes onto this single long-lived branch.
@@ -197,11 +197,11 @@ techwriter.ai **replaces both with native GitHub primitives**:
   to host.
 - **You decide when to publish.** When the accumulated docs look good, mark the
   Draft PR **"Ready for review"** and **Merge** it. `pages-deploy` redeploys.
-  techwriter.ai then opens a fresh empty Draft PR for the next batch.
+  Autoscribe then opens a fresh empty Draft PR for the next batch.
 
 Mapping from the reference's tables to GitHub:
 
-| Reference (SQLite)     | techwriter.ai (GitHub-native)                          |
+| Reference (SQLite)     | Autoscribe (GitHub-native)                          |
 |------------------------|-----------------------------------------------------|
 | `drafts` table         | the `autoscribe/updates` branch + standing Draft PR |
 | `suggestions` / `hunks`| the PR diff itself                                  |
@@ -210,7 +210,7 @@ Mapping from the reference's tables to GitHub:
 | `runLogs`              | `.autoscribe/state.json` + git history              |
 
 > **Tip:** treat the Draft PR like an editor's desk. Leave line comments on
-> anything techwriter.ai got wrong before merging — your comments are visible to
+> anything Autoscribe got wrong before merging — your comments are visible to
 > the next sync run, which can address them.
 
 ---
@@ -353,7 +353,7 @@ npm run build    # production build (what pages-deploy runs)
 npm run serve    # preview the production build locally
 ```
 
-You rarely need this — techwriter.ai writes the content and Actions builds it — but
+You rarely need this — Autoscribe writes the content and Actions builds it — but
 it's here if you want to hand-edit a page or preview before merging.
 
 ---

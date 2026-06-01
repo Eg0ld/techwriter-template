@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# techwriter.ai — Per-PR documentation sync
+# Autoscribe — Per-PR documentation sync
 #
 # Fired by repository_dispatch (event_type: autoscribe-sync) when a PR merges in
 # the WATCHED repo. The control plane's GitHub App receives the watched repo's
@@ -27,7 +27,7 @@
 #   • NO_GAP path keeps trivial PRs to ~one cheap call (wave/cost discipline
 #     inherited from the reference's wave-based concurrency model).
 # ─────────────────────────────────────────────────────────────────────────────
-name: techwriter.ai · Sync
+name: Autoscribe · Sync
 
 on:
   repository_dispatch:
@@ -79,7 +79,7 @@ jobs:
           fetch-depth: 0
 
       # 2) Read config (watched repo fallback + per-PR model + turn cap).
-      - name: Read techwriter.ai config
+      - name: Read Autoscribe config
         id: cfg
         run: |
           set -euo pipefail
@@ -177,7 +177,7 @@ jobs:
       #    reference's runLogs / PR-queue tables (schema: .autoscribe/state.schema.json).
       #    We advance cursor.lastProcessedPr, upsert this PR's queue entry with the
       #    right lifecycle status, and append one runLog entry.
-      - name: Update techwriter.ai state
+      - name: Update Autoscribe state
         id: state
         run: |
           set -euo pipefail
@@ -256,7 +256,7 @@ jobs:
             cat > /tmp/draft-body.md <<EOF
           ## Rolling documentation updates
 
-          techwriter.ai maintains this **draft** PR. Each merged PR in the watched
+          Autoscribe maintains this **draft** PR. Each merged PR in the watched
           repository that affects the docs adds commits here. The draft accumulates
           changes across many source PRs.
 
@@ -264,7 +264,7 @@ jobs:
           Pages redeploys on merge to ${BT}main${BT}. Review the **Files changed**
           tab; per-commit messages link each change to its source PR.
 
-          _Maintained automatically by the techwriter.ai sync workflow._
+          _Maintained automatically by the Autoscribe sync workflow._
           EOF
             sed -i 's/^          //' /tmp/draft-body.md
             gh pr create \
