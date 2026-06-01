@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# techwriter.ai — Build & deploy the Docusaurus site to GitHub Pages
+# Autoscribe — Build & deploy the Docusaurus site to GitHub Pages
 #
-# Runs on every push to main (i.e. after an techwriter.ai doc PR is merged) and on
+# Runs on every push to main (i.e. after an Autoscribe doc PR is merged) and on
 # demand. Builds the static site and deploys it with the official GitHub Pages
 # actions — no third-party deploy infra. Pages source must be set to "GitHub
 # Actions" in repo Settings → Pages (the control plane sets this at scaffold
