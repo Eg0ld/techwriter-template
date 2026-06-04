@@ -29,6 +29,10 @@ concurrency:
 jobs:
   # 1) Build the Docusaurus static site → ./build, upload as the Pages artifact.
   build:
+    # The template repo itself has no Pages site (the control plane enables
+    # Pages on scaffolded repos) — skip there so pushes to the template don't
+    # fail. Scaffolded copies have is_template=false and run normally.
+    if: ${{ !github.event.repository.is_template }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
