@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://autoscribe.dev/schemas/config.schema.json",
   "title": "Autoscribe Config",
-  "description": "Committed configuration for an Autoscribe docs site. Lives at `.autoscribe/config.json` in the docs (tenant) repo and travels with the project. Holds NO secrets — the Anthropic API key is a GitHub repo secret (ANTHROPIC_API_KEY), never stored here.",
+  "description": "Committed configuration for an Autoscribe docs site. Lives at `.autoscribe/config.json` in the docs (tenant) repo and travels with the project. Holds NO secrets — the model credential is a GitHub repo secret (ANTHROPIC_API_KEY for an API key, or CLAUDE_CODE_OAUTH_TOKEN for a Claude subscription token), never stored here.",
   "type": "object",
   "additionalProperties": false,
   "required": ["watchedRepo", "docsDir"],
@@ -64,9 +64,28 @@
     },
     "spendCeilingUSD": {
       "type": "number",
-      "description": "Soft spend ceiling, in USD, for a single Action run. When the runner's estimated/observed spend for a run would exceed this, it stops early and records the breach instead of continuing. Because it is the user's own Anthropic key, this is a guardrail against runaway bills.",
+      "description": "Soft spend ceiling, in USD, for a single Action run. When the runner's estimated/observed spend for a run would exceed this, it stops early and records the breach instead of continuing. Because it is the user's own Anthropic key, this is a guardrail against runaway bills. Applies only to `agent.auth: \"api_key\"` (metered billing); a Claude subscription token is not per-token billed, so this is ignored under `\"subscription\"` and the agent's own subscription rate limits apply instead.",
       "default": 10,
       "exclusiveMinimum": 0
+    },
+    "agent": {
+      "type": "object",
+      "description": "Which agent runtime runs in CI and how it authenticates to the model provider. Holds NO secret — the credential value is a GitHub Actions repo secret, never stored here.",
+      "additionalProperties": false,
+      "properties": {
+        "runtime": {
+          "type": "string",
+          "description": "The coding-agent CLI the workflows install and invoke to read the code and write the docs. `claude-code` (Anthropic's @anthropic-ai/claude-code) is the built-in, fully-supported runtime. Other values name a 'bring your own agent' runtime and require a matching adapter in the template's workflows; an unrecognized runtime fails the run with a clear error rather than silently mis-running.",
+          "default": "claude-code",
+          "examples": ["claude-code", "nanoclaw", "openclaw"]
+        },
+        "auth": {
+          "type": "string",
+          "description": "How the runtime authenticates. `api_key` uses the ANTHROPIC_API_KEY repo secret (metered, pay-per-token). `subscription` uses the CLAUDE_CODE_OAUTH_TOKEN repo secret — a Claude Pro/Max subscription token from `claude setup-token` — billed against the subscription instead of the API, subject to its rate limits.",
+          "enum": ["api_key", "subscription"],
+          "default": "api_key"
+        }
+      }
     }
   }
 }

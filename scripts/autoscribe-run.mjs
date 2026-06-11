@@ -43,7 +43,10 @@
  *   AUTOSCRIBE_PR        PR number (overrides payload)
  *   AUTOSCRIBE_REPO      watched repo owner/name (overrides config.watchedRepo)
  *   GITHUB_TOKEN / GH_TOKEN  token for diff fetch (gh uses it automatically)
- *   ANTHROPIC_API_KEY    the user's key; consumed by the Claude Code CLI
+ *   ANTHROPIC_API_KEY        the user's API key (metered) — consumed by Claude Code
+ *   CLAUDE_CODE_OAUTH_TOKEN  alt credential: a Claude Pro/Max subscription token
+ *                            (from `claude setup-token`). Exactly one of these two
+ *                            is set; both are inherited via process.env below.
  *   CLAUDE_BIN           path to the Claude Code CLI (default: "claude")
  *   AUTOSCRIBE_DRY_RUN   "1" to skip the agent call (plumbing test)
  *   AUTOSCRIBE_HOME      repo root (default: process.cwd())
