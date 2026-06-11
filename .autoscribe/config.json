@@ -9,5 +9,9 @@
   "model": "sonnet",
   "initModel": "opus",
   "waveSize": 8,
-  "spendCeilingUSD": 10
+  "spendCeilingUSD": 10,
+  "agent": {
+    "runtime": "claude-code",
+    "auth": "api_key"
+  }
 }
