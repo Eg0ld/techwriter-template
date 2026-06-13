@@ -1,0 +1,45 @@
+name: Dependabot Auto-merge
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  check_suite:
+    types: [completed]
+
+permissions:
+  pull-requests: write
+  contents: write
+
+jobs:
+  auto-merge-on-pr:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.actor == 'dependabot[bot]'
+    steps:
+      - name: Enable auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr merge "${{ github.event.pull_request.number }}" \
+            --auto \
+            --squash \
+            --repo "${{ github.repository }}"
+
+  auto-merge-on-check-suite:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'check_suite' && github.event.check_suite.conclusion == 'success'
+    steps:
+      - name: Enable auto-merge on passing Dependabot PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Find open Dependabot PRs whose head SHA matches this check suite
+          HEAD_SHA="${{ github.event.check_suite.head_sha }}"
+          gh pr list \
+            --repo "${{ github.repository }}" \
+            --author "app/dependabot" \
+            --state open \
+            --json number,headRefOid \
+            --jq ".[] | select(.headRefOid == \"$HEAD_SHA\") | .number" \
+          | while read PR_NUMBER; do
+              gh pr merge "$PR_NUMBER" --auto --squash --repo "${{ github.repository }}" || true
+            done
