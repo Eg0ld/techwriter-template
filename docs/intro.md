@@ -19,14 +19,16 @@ generated documentation is merged. Check back shortly.
 
 1. ✅ Your docs repository was created.
 2. ⏳ The engine **generates your initial documentation** from your code.
-3. 📝 It opens a **draft pull request** with those docs.
-4. 🚀 **Merge that PR** — this page is replaced by your real documentation and the
-   site redeploys automatically.
+3. 🚀 It **publishes automatically** — this page is replaced by your real
+   documentation and the site redeploys, no action needed from you.
+
+_After this first build, ongoing updates (as the watched repo changes) arrive as
+**draft pull requests** you review and merge — so you stay in control of changes._
 
 ## Track progress
 
-- The **Actions** tab → the _Initial docs_ run shows live progress.
-- **Pull requests** → your generated docs arrive as a draft PR to review and merge.
+- The **Actions** tab → the _Autoscribe · Initial docs_ run shows live progress.
+- This page refreshes to your real docs as soon as that run finishes.
 
 ## It's your repo
 
