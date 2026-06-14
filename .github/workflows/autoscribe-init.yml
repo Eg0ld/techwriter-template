@@ -3,18 +3,20 @@
 #
 # Manual (workflow_dispatch) one-time job. Clones the WATCHED repo (the code we
 # document), runs Claude Code headless to survey it and write the initial
-# Docusaurus content tree (/docs/**.md(x) + _category_.json), then opens a PR
-# titled "📚 Initial documentation" for the owner to review and merge.
+# Docusaurus content tree (/docs/**.md(x) + _category_.json), then PUBLISHES it.
 #
-# State model (GitHub-native, see PLATFORM-SPEC §7):
-#   • .autoscribe/config.json  — watched repo + docs dir + model/budget config
-#   • .autoscribe/prompts/init.md — the ported "initial build" agent prompt
-#   • The PR is the review UI. Nothing is hosted off-GitHub.
+# The FIRST build auto-publishes: it commits the generated docs straight to the
+# default branch and deploys to GitHub Pages in the same run. There is nothing to
+# review against on the first build, so no PR / manual merge is required. (Ongoing
+# per-PR doc updates DO go through a reviewable draft PR — see autoscribe-sync.)
+#
+# Why deploy here instead of letting the Deploy workflow fire: a push made with
+# the default GITHUB_TOKEN does NOT trigger other workflows, so we build + deploy
+# Pages inline rather than relying on the on-push Deploy workflow.
 #
 # Cost note: the initial build is the single most expensive run (it reads the
 # whole repo and fans out one section at a time). It runs on the OWNER'S
-# Anthropic key. We default to Opus only here (deep one-shot); per-PR sync uses
-# Sonnet. --max-turns caps runaway loops.
+# credential. We default to Opus only here; per-PR sync uses Sonnet.
 # ─────────────────────────────────────────────────────────────────────────────
 name: Autoscribe · Initial docs
 
@@ -22,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Generate docs and upload as an artifact, but do not open a PR"
+        description: "Generate docs and upload as an artifact, but do not publish"
         type: boolean
         default: false
 
@@ -32,37 +34,22 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write       # create the autoscribe/initial-docs branch + commit
-  pull-requests: write  # open the "📚 Initial documentation" PR
+  contents: write   # commit the generated docs to the default branch
+  pages: write      # deploy the built site to GitHub Pages
+  id-token: write   # OIDC token for actions/deploy-pages
 
 jobs:
   build-initial-docs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    env:
-      # SECRET PARTITIONING (defense against prompt injection): the agent reads
-      # the attacker-authored watched repo, so its step must NOT hold the GitHub
-      # token. Secrets are scoped per-step instead of job-wide:
-      #   • the model credential (ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN) is
-      #     injected ONLY into the "Generate initial docs" step;
-      #   • GH_TOKEN is injected ONLY into the clone + open-PR steps, which run
-      #     no model output.
-      # Only non-secret values live at job scope.
-      DOCS_BRANCH: autoscribe/initial-docs
     steps:
       # 1) Check out THIS docs repo (where the generated /docs land).
       - name: Checkout docs repo
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          fetch-depth: 0   # full history so we can branch + push cleanly
+          fetch-depth: 0   # full history so we can rebase + push cleanly
 
       # 2) Read .autoscribe/config.json to learn the watched repo + docs dir.
-      #    config.json shape (written at scaffold time by the control plane):
-      #    { "watchedRepo": "kibook/s1kd-tools", "docsDir": "docs",
-      #      "model": "sonnet", "initModel": "opus", "waveSize": 8,
-      #      "spendCeilingUSD": 10 }
-      #    The initial build uses initModel (Opus by default). maxTurns defaults
-      #    to 200 here as a runaway-loop cap (config may override via .maxTurns).
       - name: Read Autoscribe config
         id: cfg
         run: |
@@ -81,10 +68,9 @@ jobs:
           echo "$WATCHED" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' \
             || { echo "::error::watchedRepo '$WATCHED' is not a valid owner/name"; exit 1; }
           # This workflow ships the claude-code adapter only. A "bring your own
-          # agent" runtime needs its own adapter wired here — fail loudly rather
-          # than silently running Claude Code with the wrong config.
+          # agent" runtime needs its own adapter wired here — fail loudly.
           test "$RUNTIME" = "claude-code" \
-            || { echo "::error::agent.runtime '$RUNTIME' is not supported by this workflow (only 'claude-code'). Wire an adapter for it first."; exit 1; }
+            || { echo "::error::agent.runtime '$RUNTIME' is not supported (only 'claude-code'). Wire an adapter first."; exit 1; }
           {
             echo "watched=$WATCHED"
             echo "docs_dir=$DOCS_DIR"
@@ -94,10 +80,8 @@ jobs:
           echo "Watched repo: $WATCHED · docs dir: $DOCS_DIR · model: $INIT_MODEL"
 
       # 3) Shallow-clone the watched repo into ./.watched (read-only source).
-      #    Shallow because the agent only needs the current tree, not history.
-      #    WATCHED is passed via env (not ${{ }} interpolation) so its value is
-      #    bash DATA, never spliced into the script body. GH_TOKEN lives here,
-      #    not at job scope, so the later agent step never sees it.
+      #    WATCHED is passed via env (not ${{ }} interpolation). GH_TOKEN lives
+      #    here, not at job scope, so the agent step never sees it.
       - name: Clone watched repo (shallow)
         env:
           GH_TOKEN: ${{ secrets.WATCHED_REPO_TOKEN || secrets.GITHUB_TOKEN }}
@@ -107,33 +91,24 @@ jobs:
           gh repo clone "$WATCHED" .watched -- --depth 1
           echo "Cloned $WATCHED @ $(git -C .watched rev-parse --short HEAD)"
 
-      # 4) Node toolchain (Docusaurus needs Node 20+; we also run the CLI here).
       - name: Set up Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 20
 
-      # 5) Install the Claude Code CLI (the agent runtime).
       - name: Install Claude Code CLI
         run: npm install -g @anthropic-ai/claude-code
 
-      # 6) Run the agent headless.
-      #    - The system-prompt file (.autoscribe/prompts/init.md) carries the
-      #      ported "initial build" intelligence: survey → propose sidebar IA →
-      #      fan out one section at a time → editorial pass.
-      #    - --add-dir grants READ access to the cloned watched repo.
-      #
+      # 4) Run the agent headless.
       #    SECURITY MODEL — the agent reads the entire attacker-authored watched
-      #    repo, so its every file is treated as untrusted DATA, never trusted
-      #    instructions. To make prompt injection non-catastrophic:
-      #      • NO GitHub token in this step's env (see job-level note) — nothing
-      #        repo-write-capable to steal or abuse.
-      #      • NO bypassPermissions and NO Bash tool — the model cannot read the
-      #        process environment, so it cannot reach the model credential to
-      #        exfiltrate it, and cannot run arbitrary commands. acceptEdits lets
-      #        it write docs files non-interactively; everything else is denied.
-      #      • The turn prompt explicitly frames watched content as data and tells
-      #        the agent to ignore any instructions found inside it.
+      #    repo, so every file is untrusted DATA, never trusted instructions:
+      #      • NO GitHub token in this step's env — nothing repo-write-capable to
+      #        steal or abuse.
+      #      • NO bypassPermissions and NO Bash tool — the model can't read the
+      #        process env (so can't exfiltrate the credential) or run commands;
+      #        acceptEdits lets it write docs files, nothing else.
+      #      • The prompt frames watched content as data and says to ignore any
+      #        instructions found inside it.
       - name: Generate initial docs
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -145,9 +120,9 @@ jobs:
           MAX_TURNS: ${{ steps.cfg.outputs.max_turns }}
         run: |
           set -euo pipefail
-          # Exactly one of the two model credentials is set; the other arrives as
-          # "" and would shadow the real one — drop the empty one. Claude Code
-          # prefers CLAUDE_CODE_OAUTH_TOKEN when present, else ANTHROPIC_API_KEY.
+          # Exactly one model credential is set; the other arrives as "" and would
+          # shadow the real one — drop the empty one. Claude Code prefers
+          # CLAUDE_CODE_OAUTH_TOKEN when present, else ANTHROPIC_API_KEY.
           [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || unset CLAUDE_CODE_OAUTH_TOKEN
           [ -n "${ANTHROPIC_API_KEY:-}" ] || unset ANTHROPIC_API_KEY
           if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
@@ -180,65 +155,39 @@ jobs:
             --output-format json \
             | tee /tmp/init-result.json
 
-      # 7) Open the PR (skipped on dry runs). gh pr create handles the branch
-      #    push + PR open. We keep the watched clone out of the commit.
-      - name: Commit and open PR
+      # 5) Auto-publish: commit the generated docs straight to the default branch.
+      #    Docs-only commit, so the default GITHUB_TOKEN can push it (the workflow-
+      #    file push restriction never applies). The `deploy` job then builds +
+      #    publishes it to Pages.
+      - name: Commit & publish initial docs
         if: ${{ inputs.dry_run == false }}
         env:
-          GH_TOKEN: ${{ secrets.WATCHED_REPO_TOKEN || secrets.GITHUB_TOKEN }}
           WATCHED: ${{ steps.cfg.outputs.watched }}
           DOCS_DIR: ${{ steps.cfg.outputs.docs_dir }}
         run: |
           set -euo pipefail
           git config user.name  "autoscribe[bot]"
           git config user.email "autoscribe[bot]@users.noreply.github.com"
-
-          git checkout -b "$DOCS_BRANCH"
           # Never commit the read-only watched clone or transient agent files.
           echo ".watched/" >> .git/info/exclude
           git add "$DOCS_DIR" .autoscribe/
           if git diff --cached --quiet; then
-            echo "::warning::Agent produced no changes — nothing to open a PR for."
+            echo "::warning::Agent produced no changes — nothing to publish."
             exit 0
           fi
-
           git commit -m "📚 Initial documentation
 
-          Generated by Autoscribe from $WATCHED.
+          Generated by techwriter.ai from $WATCHED.
 
           Co-Authored-By: autoscribe[bot] <autoscribe[bot]@users.noreply.github.com>"
-          git push --set-upstream origin "$DOCS_BRANCH" --force-with-lease
+          # Land on the default branch, rebasing over anything CI committed during
+          # the (long) generation run.
+          BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+          git pull --rebase origin "$BRANCH" || true
+          git push origin "HEAD:$BRANCH"
 
-          # Build the PR body in a file (heredoc is NOT indented so the markdown
-          # isn't swallowed into a code block). Backticks are written via a shell
-          # variable so they survive the literal quoted heredoc.
-          BT='`'
-          cat > /tmp/pr-body.md <<EOF
-          ## Initial documentation build
-
-          Autoscribe surveyed the watched repository and generated the initial
-          Docusaurus content tree (pages, categories, and sidebar structure).
-
-          - **Source:** ${BT}${WATCHED}${BT}
-          - **Review:** this PR diff is the review surface. Edit any page directly
-            on this branch, then **merge** to publish. GitHub Pages redeploys on
-            merge to ${BT}main${BT}.
-
-          _Opened automatically by the Autoscribe initial-build workflow._
-          EOF
-          # Strip the YAML indentation that leads each body line.
-          sed -i 's/^          //' /tmp/pr-body.md
-
-          gh pr create \
-            --title "📚 Initial documentation" \
-            --body-file /tmp/pr-body.md \
-            --base main \
-            --head "$DOCS_BRANCH" \
-            || echo "::warning::PR may already exist for $DOCS_BRANCH — pushed commits instead."
-
-      # 8) On dry runs (or always, as a backup), keep the generated tree as an
-      #    artifact so the owner can inspect before any PR exists.
-      - name: Upload generated docs (dry-run / backup)
+      # 6) Always keep the generated tree as an artifact (also the dry-run output).
+      - name: Upload generated docs (backup / dry-run)
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         continue-on-error: true
@@ -246,3 +195,53 @@ jobs:
           name: autoscribe-init-preview
           path: ${{ steps.cfg.outputs.docs_dir }}
           retention-days: 7
+
+  # Build the just-committed docs and publish to GitHub Pages in the same run
+  # (a GITHUB_TOKEN push won't trigger the on-push Deploy workflow).
+  deploy:
+    needs: build-initial-docs
+    if: ${{ inputs.dry_run == false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - name: Checkout (latest default branch, with the new docs)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.ref_name }}
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 20
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Build Docusaurus
+        # Same correct-baseUrl computation as pages-deploy.yml.
+        run: |
+          set -euo pipefail
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          REPO="${GITHUB_REPOSITORY#*/}"
+          if [ -f static/CNAME ]; then
+            SITE_URL="https://$(tr -d '[:space:]' < static/CNAME)"
+            BASE_URL="/"
+          else
+            SITE_URL="https://${OWNER}.github.io"
+            BASE_URL="/${REPO}/"
+          fi
+          echo "Building site → url=$SITE_URL  baseUrl=$BASE_URL"
+          SITE_URL="$SITE_URL" BASE_URL="$BASE_URL" GH_ORG="$OWNER" GH_REPO="$REPO" \
+            npm run build
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ./build
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
