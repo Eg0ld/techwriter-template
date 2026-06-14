@@ -67,17 +67,30 @@ jobs:
           # a malformed config can't smuggle shell metacharacters downstream.
           echo "$WATCHED" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' \
             || { echo "::error::watchedRepo '$WATCHED' is not a valid owner/name"; exit 1; }
-          # This workflow ships the claude-code adapter only. A "bring your own
-          # agent" runtime needs its own adapter wired here — fail loudly.
-          test "$RUNTIME" = "claude-code" \
-            || { echo "::error::agent.runtime '$RUNTIME' is not supported (only 'claude-code'). Wire an adapter first."; exit 1; }
+          # Agent runtime adapters. "claude-code" is the built-in. "custom" is the
+          # bring-your-own-agent seam: the owner supplies agent.command — any CLI
+          # (openclaw, nanoclaw, a local Ollama-backed agent, …) — which we run with
+          # the same prompt + sandbox env, and which brings its OWN model credential.
+          # Anything else fails loudly so a typo can't silently no-op.
+          AGENT_CMD=$(jq -r '.agent.command // ""' "$CFG")
+          case "$RUNTIME" in
+            claude-code) ;;
+            custom)
+              test -n "$AGENT_CMD" \
+                || { echo "::error::agent.runtime 'custom' requires agent.command in .autoscribe/config.json"; exit 1; } ;;
+            *) echo "::error::agent.runtime '$RUNTIME' not supported (use 'claude-code' or 'custom')"; exit 1 ;;
+          esac
           {
             echo "watched=$WATCHED"
             echo "docs_dir=$DOCS_DIR"
             echo "init_model=$INIT_MODEL"
             echo "max_turns=$MAX_TURNS"
+            echo "runtime=$RUNTIME"
+            echo "agent_cmd<<__AUTOSCRIBE_CMD__"
+            echo "$AGENT_CMD"
+            echo "__AUTOSCRIBE_CMD__"
           } >> "$GITHUB_OUTPUT"
-          echo "Watched repo: $WATCHED · docs dir: $DOCS_DIR · model: $INIT_MODEL"
+          echo "Watched repo: $WATCHED · docs dir: $DOCS_DIR · model: $INIT_MODEL · runtime: $RUNTIME"
 
       # 3) Shallow-clone the watched repo into ./.watched (read-only source).
       #    WATCHED is passed via env (not ${{ }} interpolation). GH_TOKEN lives
@@ -97,6 +110,7 @@ jobs:
           node-version: 20
 
       - name: Install Claude Code CLI
+        if: ${{ steps.cfg.outputs.runtime == 'claude-code' }}
         run: npm install -g @anthropic-ai/claude-code
 
       # 4) Run the agent headless.
@@ -118,19 +132,12 @@ jobs:
           WATCHED_REPO: ${{ steps.cfg.outputs.watched }}
           INIT_MODEL: ${{ steps.cfg.outputs.init_model }}
           MAX_TURNS: ${{ steps.cfg.outputs.max_turns }}
+          RUNTIME: ${{ steps.cfg.outputs.runtime }}
+          AGENT_CMD: ${{ steps.cfg.outputs.agent_cmd }}
         run: |
           set -euo pipefail
-          # Exactly one model credential is set; the other arrives as "" and would
-          # shadow the real one — drop the empty one. Claude Code prefers
-          # CLAUDE_CODE_OAUTH_TOKEN when present, else ANTHROPIC_API_KEY.
-          [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || unset CLAUDE_CODE_OAUTH_TOKEN
-          [ -n "${ANTHROPIC_API_KEY:-}" ] || unset ANTHROPIC_API_KEY
-          if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-            echo "::error::No model credential found. Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN as an Actions secret."
-            exit 1
-          fi
           WATCHED_SHA=$(git -C .watched rev-parse HEAD)
-          claude -p "Build the initial documentation site.
+          PROMPT="Build the initial documentation site.
 
           Watched repository: $WATCHED_REPO (commit $WATCHED_SHA)
           Watched source is cloned READ-ONLY at: $WATCHED_PATH
@@ -145,15 +152,46 @@ jobs:
           Survey the watched repo, propose a sidebar information architecture, then
           write Markdown/MDX pages plus _category_.json files for each section. Add
           a provenance line to each page noting it was generated from $WATCHED_REPO
-          at $WATCHED_SHA. Do not modify anything under $WATCHED_PATH." \
-            --append-system-prompt-file .autoscribe/prompts/init.md \
-            --add-dir "$WATCHED_PATH" \
-            --model "$INIT_MODEL" \
-            --permission-mode acceptEdits \
-            --allowedTools "Read" "Write" "Edit" "Glob" "Grep" \
-            --max-turns "$MAX_TURNS" \
-            --output-format json \
-            | tee /tmp/init-result.json
+          at $WATCHED_SHA. Do not modify anything under $WATCHED_PATH."
+
+          if [ "$RUNTIME" = "custom" ]; then
+            # ── Bring-your-own-agent adapter ──────────────────────────────────
+            # Run the owner-supplied command. Same sandbox as claude-code: NO
+            # GitHub token in this step's env (nothing repo-write-capable to abuse).
+            # The command receives the task via $AUTOSCRIBE_PROMPT (+ a file copy)
+            # and the standard paths, and is responsible for its OWN model
+            # credential (its own API key, a local Ollama endpoint, etc.).
+            # agent.command comes from the OWNER's config.json — never the watched
+            # (untrusted) repo — so running it is the owner's own choice.
+            echo "$PROMPT" > /tmp/autoscribe-prompt.txt
+            export AUTOSCRIBE_PROMPT="$PROMPT"
+            export AUTOSCRIBE_PROMPT_FILE=/tmp/autoscribe-prompt.txt
+            export AUTOSCRIBE_WATCHED_PATH="$WATCHED_PATH"
+            export AUTOSCRIBE_DOCS_DIR="$DOCS_DIR"
+            export AUTOSCRIBE_MODEL="$INIT_MODEL"
+            echo "Running custom agent runtime: $AGENT_CMD"
+            bash -lc "$AGENT_CMD" | tee /tmp/init-result.json
+          else
+            # ── Built-in claude-code adapter ──────────────────────────────────
+            # Exactly one model credential is set; the other arrives as "" and would
+            # shadow the real one — drop the empty one. Claude Code prefers
+            # CLAUDE_CODE_OAUTH_TOKEN when present, else ANTHROPIC_API_KEY.
+            [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || unset CLAUDE_CODE_OAUTH_TOKEN
+            [ -n "${ANTHROPIC_API_KEY:-}" ] || unset ANTHROPIC_API_KEY
+            if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+              echo "::error::No model credential found. Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN as an Actions secret."
+              exit 1
+            fi
+            claude -p "$PROMPT" \
+              --append-system-prompt-file .autoscribe/prompts/init.md \
+              --add-dir "$WATCHED_PATH" \
+              --model "$INIT_MODEL" \
+              --permission-mode acceptEdits \
+              --allowedTools "Read" "Write" "Edit" "Glob" "Grep" \
+              --max-turns "$MAX_TURNS" \
+              --output-format json \
+              | tee /tmp/init-result.json
+          fi
 
       # 5) Auto-publish: commit the generated docs straight to the default branch.
       #    Docs-only commit, so the default GITHUB_TOKEN can push it (the workflow-
