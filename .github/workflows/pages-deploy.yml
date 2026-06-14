@@ -52,7 +52,26 @@ jobs:
         run: npm install --no-audit --no-fund
 
       - name: Build Docusaurus
-        run: npm run build   # Docusaurus outputs static files to ./build
+        # The template's docusaurus.config reads url/baseUrl/GH_ORG/GH_REPO from
+        # these env vars. A project Pages site lives at
+        # https://<owner>.github.io/<repo>/, so baseUrl MUST be /<repo>/ — without
+        # it every CSS/JS asset 404s and Docusaurus shows its "site did not load
+        # properly (wrong baseUrl)" error. If the repo pins a custom domain via
+        # static/CNAME, it serves at the domain root instead, so baseUrl is '/'.
+        run: |
+          set -euo pipefail
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          REPO="${GITHUB_REPOSITORY#*/}"
+          if [ -f static/CNAME ]; then
+            SITE_URL="https://$(tr -d '[:space:]' < static/CNAME)"
+            BASE_URL="/"
+          else
+            SITE_URL="https://${OWNER}.github.io"
+            BASE_URL="/${REPO}/"
+          fi
+          echo "Building site → url=$SITE_URL  baseUrl=$BASE_URL"
+          SITE_URL="$SITE_URL" BASE_URL="$BASE_URL" GH_ORG="$OWNER" GH_REPO="$REPO" \
+            npm run build   # Docusaurus outputs static files to ./build
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
