@@ -152,6 +152,8 @@ jobs:
       #    Reuse autoscribe/updates if it exists (the draft accumulates); else
       #    branch from the current main.
       - name: Check out rolling updates branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           git config user.name  "autoscribe[bot]"
@@ -161,8 +163,18 @@ jobs:
             git checkout -B "$UPDATES_BRANCH" "origin/$UPDATES_BRANCH"
             echo "Reusing existing rolling branch $UPDATES_BRANCH"
           else
-            git checkout -B "$UPDATES_BRANCH"
-            echo "Created rolling branch $UPDATES_BRANCH"
+            # Create the branch on the remote as a POINTER to main's current
+            # commit, via the API. A plain `git push` of a brand-new branch is
+            # rejected — the default GITHUB_TOKEN can't "create" workflow files on
+            # a new ref. A ref that points at an existing commit introduces no
+            # file changes, so it's allowed; subsequent docs-only pushes to the
+            # now-existing branch are allowed too.
+            MAIN_SHA="$(git rev-parse origin/main 2>/dev/null || git rev-parse HEAD)"
+            gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/heads/$UPDATES_BRANCH" -f sha="$MAIN_SHA" >/dev/null
+            git fetch origin "$UPDATES_BRANCH"
+            git checkout -B "$UPDATES_BRANCH" "origin/$UPDATES_BRANCH"
+            echo "Created rolling branch $UPDATES_BRANCH at $MAIN_SHA"
           fi
 
       # 5) Run the agent. analyze.md (ported) tells it to classify the gap and,
