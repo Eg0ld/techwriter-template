@@ -105,14 +105,25 @@ jobs:
           SYNC_MODEL=$(jq -r '.model // "sonnet"' "$CFG")
           MAX_TURNS=$(jq -r '.maxTurns // 40' "$CFG")
           RUNTIME=$(jq -r '.agent.runtime // "claude-code"' "$CFG")
-          # claude-code adapter only; a BYO runtime must be wired here first.
-          test "$RUNTIME" = "claude-code" \
-            || { echo "::error::agent.runtime '$RUNTIME' is not supported by this workflow (only 'claude-code'). Wire an adapter for it first."; exit 1; }
+          # Agent runtime adapters: "claude-code" is built-in; "custom" runs the
+          # owner-supplied agent.command (bring-your-own-agent). Anything else fails.
+          AGENT_CMD=$(jq -r '.agent.command // ""' "$CFG")
+          case "$RUNTIME" in
+            claude-code) ;;
+            custom)
+              test -n "$AGENT_CMD" \
+                || { echo "::error::agent.runtime 'custom' requires agent.command in .autoscribe/config.json"; exit 1; } ;;
+            *) echo "::error::agent.runtime '$RUNTIME' not supported (use 'claude-code' or 'custom')"; exit 1 ;;
+          esac
           {
             echo "watched=$WATCHED"
             echo "docs_dir=$DOCS_DIR"
             echo "sync_model=$SYNC_MODEL"
             echo "max_turns=$MAX_TURNS"
+            echo "runtime=$RUNTIME"
+            echo "agent_cmd<<__AUTOSCRIBE_CMD__"
+            echo "$AGENT_CMD"
+            echo "__AUTOSCRIBE_CMD__"
           } >> "$GITHUB_OUTPUT"
 
       # 3) Fetch the merged PR diff from the watched repo via gh api.
@@ -146,6 +157,7 @@ jobs:
           node-version: 20
 
       - name: Install Claude Code CLI
+        if: ${{ steps.cfg.outputs.runtime == 'claude-code' }}
         run: npm install -g @anthropic-ai/claude-code
 
       # 4) Work on the rolling branch so the agent edits the draft's working tree.
@@ -201,16 +213,11 @@ jobs:
           WATCHED_REPO: ${{ steps.cfg.outputs.watched }}
           SYNC_MODEL: ${{ steps.cfg.outputs.sync_model }}
           MAX_TURNS: ${{ steps.cfg.outputs.max_turns }}
+          RUNTIME: ${{ steps.cfg.outputs.runtime }}
+          AGENT_CMD: ${{ steps.cfg.outputs.agent_cmd }}
         run: |
           set -euo pipefail
-          # Keep exactly the configured credential (see job env note).
-          [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || unset CLAUDE_CODE_OAUTH_TOKEN
-          [ -n "${ANTHROPIC_API_KEY:-}" ] || unset ANTHROPIC_API_KEY
-          if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-            echo "::error::No model credential found. Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN as an Actions secret."
-            exit 1
-          fi
-          claude -p "A pull request just merged in the watched repository. Decide whether it changes the documentation, and if so, edit the affected pages.
+          PROMPT="A pull request just merged in the watched repository. Decide whether it changes the documentation, and if so, edit the affected pages.
 
           Watched repository: $WATCHED_REPO
           Merged PR: #${IN_PR}
@@ -232,15 +239,44 @@ jobs:
           Add a provenance note referencing $WATCHED_REPO PR #${IN_PR}.
 
           Finally, write your decision as JSON to /tmp/autoscribe-classification.json:
-          {\"gap_type\":\"...\",\"severity\":\"low|medium|high\",\"pages\":[\"...\"],\"summary\":\"one line\"}" \
-            --append-system-prompt-file .autoscribe/prompts/analyze.md \
-            --add-dir /tmp \
-            --model "$SYNC_MODEL" \
-            --permission-mode acceptEdits \
-            --allowedTools "Read" "Write" "Edit" "Glob" "Grep" \
-            --max-turns "$MAX_TURNS" \
-            --output-format json \
-            | tee /tmp/sync-result.json
+          {\"gap_type\":\"...\",\"severity\":\"low|medium|high\",\"pages\":[\"...\"],\"summary\":\"one line\"}"
+
+          if [ "$RUNTIME" = "custom" ]; then
+            # ── Bring-your-own-agent adapter ──────────────────────────────────
+            # No GitHub token in env (same sandbox as claude-code). The command
+            # gets the task + the diff path + PR metadata, and must write its
+            # classification to $AUTOSCRIBE_CLASSIFICATION_FILE (else state defaults
+            # to NO_GAP). It brings its own model credential.
+            echo "$PROMPT" > /tmp/autoscribe-prompt.txt
+            export AUTOSCRIBE_PROMPT="$PROMPT"
+            export AUTOSCRIBE_PROMPT_FILE=/tmp/autoscribe-prompt.txt
+            export AUTOSCRIBE_DOCS_DIR="$DOCS_DIR"
+            export AUTOSCRIBE_MODEL="$SYNC_MODEL"
+            export AUTOSCRIBE_DIFF_FILE=/tmp/pr.diff
+            export AUTOSCRIBE_PR="${IN_PR}"
+            export AUTOSCRIBE_WATCHED_REPO="$WATCHED_REPO"
+            export AUTOSCRIBE_CLASSIFICATION_FILE=/tmp/autoscribe-classification.json
+            echo "Running custom agent runtime: $AGENT_CMD"
+            bash -lc "$AGENT_CMD" | tee /tmp/sync-result.json
+          else
+            # ── Built-in claude-code adapter ──────────────────────────────────
+            # Keep exactly the configured credential (see job env note).
+            [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || unset CLAUDE_CODE_OAUTH_TOKEN
+            [ -n "${ANTHROPIC_API_KEY:-}" ] || unset ANTHROPIC_API_KEY
+            if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+              echo "::error::No model credential found. Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN as an Actions secret."
+              exit 1
+            fi
+            claude -p "$PROMPT" \
+              --append-system-prompt-file .autoscribe/prompts/analyze.md \
+              --add-dir /tmp \
+              --model "$SYNC_MODEL" \
+              --permission-mode acceptEdits \
+              --allowedTools "Read" "Write" "Edit" "Glob" "Grep" \
+              --max-turns "$MAX_TURNS" \
+              --output-format json \
+              | tee /tmp/sync-result.json
+          fi
 
       # 6) Update .autoscribe/state.json — the GitHub-native replacement for the
       #    reference's runLogs / PR-queue tables (schema: .autoscribe/state.schema.json).

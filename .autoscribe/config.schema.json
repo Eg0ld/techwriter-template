@@ -75,13 +75,18 @@
       "properties": {
         "runtime": {
           "type": "string",
-          "description": "The coding-agent CLI the workflows install and invoke to read the code and write the docs. `claude-code` (Anthropic's @anthropic-ai/claude-code) is the built-in, fully-supported runtime. Other values name a 'bring your own agent' runtime and require a matching adapter in the template's workflows; an unrecognized runtime fails the run with a clear error rather than silently mis-running.",
-          "default": "claude-code",
-          "examples": ["claude-code", "nanoclaw", "openclaw"]
+          "description": "The coding-agent CLI the workflows install and invoke to read the code and write the docs. `claude-code` (Anthropic's @anthropic-ai/claude-code) is the built-in, fully-supported runtime. `custom` is the bring-your-own-agent runtime: the workflow runs `agent.command` (any CLI — openclaw, nanoclaw, a local Ollama-backed agent, …) with the task in $AUTOSCRIBE_PROMPT and the standard paths, and the command brings its own model credential. Any other value fails the run with a clear error rather than silently mis-running.",
+          "enum": ["claude-code", "custom"],
+          "default": "claude-code"
+        },
+        "command": {
+          "type": "string",
+          "description": "Required when `runtime` is `custom`: the shell command that runs your own agent. It runs with NO GitHub token in scope (same sandbox as the built-in runtime) and receives the task via $AUTOSCRIBE_PROMPT / $AUTOSCRIBE_PROMPT_FILE plus $AUTOSCRIBE_WATCHED_PATH (read-only source), $AUTOSCRIBE_DOCS_DIR (where to write docs), and $AUTOSCRIBE_MODEL. Provide whatever model credential your agent needs as a separate GitHub Actions repo secret. Ignored unless `runtime` is `custom`.",
+          "examples": ["openclaw run --prompt-file \"$AUTOSCRIBE_PROMPT_FILE\" --workdir .", "npx nanoclaw --task \"$AUTOSCRIBE_PROMPT\""]
         },
         "auth": {
           "type": "string",
-          "description": "How the runtime authenticates. `api_key` uses the ANTHROPIC_API_KEY repo secret (metered, pay-per-token). `subscription` uses the CLAUDE_CODE_OAUTH_TOKEN repo secret — a Claude Pro/Max subscription token from `claude setup-token` — billed against the subscription instead of the API, subject to its rate limits.",
+          "description": "How the runtime authenticates. `api_key` uses the ANTHROPIC_API_KEY repo secret (metered, pay-per-token). `subscription` uses the CLAUDE_CODE_OAUTH_TOKEN repo secret — a Claude Pro/Max subscription token from `claude setup-token` — billed against the subscription instead of the API, subject to its rate limits. Ignored when `runtime` is `custom` (your command manages its own auth).",
           "enum": ["api_key", "subscription"],
           "default": "api_key"
         }
