@@ -19,10 +19,24 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh pr merge "${{ github.event.pull_request.number }}" \
-            --auto \
-            --squash \
-            --repo "${{ github.repository }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          set +e
+          MERGE_OUTPUT="$(gh pr merge "$PR_NUMBER" --auto --squash --repo "${{ github.repository }}" 2>&1)"
+          MERGE_EXIT=$?
+          set -e
+
+          if [ "$MERGE_EXIT" -eq 0 ]; then
+            echo "Auto-merge enabled for PR #$PR_NUMBER"
+            exit 0
+          fi
+
+          if echo "$MERGE_OUTPUT" | grep -q "Auto merge is not allowed for this repository"; then
+            echo "Repository auto-merge is disabled; skipping auto-merge enable on PR event."
+            exit 0
+          fi
+
+          echo "$MERGE_OUTPUT"
+          exit "$MERGE_EXIT"
 
   auto-merge-on-check-suite:
     runs-on: ubuntu-latest
@@ -34,12 +48,31 @@ jobs:
         run: |
           # Find open Dependabot PRs whose head SHA matches this check suite
           HEAD_SHA="${{ github.event.check_suite.head_sha }}"
-          gh pr list \
+          mapfile -t PR_NUMBERS < <(gh pr list \
             --repo "${{ github.repository }}" \
             --author "app/dependabot" \
             --state open \
             --json number,headRefOid \
-            --jq ".[] | select(.headRefOid == \"$HEAD_SHA\") | .number" \
-          | while read PR_NUMBER; do
-              gh pr merge "$PR_NUMBER" --auto --squash --repo "${{ github.repository }}" || true
+            --jq ".[] | select(.headRefOid == \"$HEAD_SHA\") | .number")
+
+          for PR_NUMBER in "${PR_NUMBERS[@]}"; do
+              [ -z "$PR_NUMBER" ] && continue
+              set +e
+              MERGE_OUTPUT="$(gh pr merge "$PR_NUMBER" --auto --squash --repo "${{ github.repository }}" 2>&1)"
+              MERGE_EXIT=$?
+              set -e
+
+              if [ "$MERGE_EXIT" -eq 0 ]; then
+                echo "Auto-merge enabled for PR #$PR_NUMBER"
+                continue
+              fi
+
+              if echo "$MERGE_OUTPUT" | grep -q "Auto merge is not allowed for this repository"; then
+                echo "Repository auto-merge is disabled; attempting direct squash merge for PR #$PR_NUMBER."
+                gh pr merge "$PR_NUMBER" --squash --repo "${{ github.repository }}" || true
+                continue
+              fi
+
+              echo "$MERGE_OUTPUT"
+              exit "$MERGE_EXIT"
             done
