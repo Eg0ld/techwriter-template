@@ -118,6 +118,30 @@
             "type": "string",
             "description": "ISO 8601 timestamp when the run finished.",
             "format": "date-time"
+          },
+          "sourcePr": {
+            "type": "integer",
+            "description": "PR number in the watched repo that triggered this run.",
+            "minimum": 1
+          },
+          "sourceRepo": {
+            "type": "string",
+            "description": "owner/name of the watched repository.",
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+          },
+          "docPr": {
+            "type": ["integer", "null"],
+            "description": "Number of the rolling draft PR in this docs repo that received the edits from this run.",
+            "minimum": 1
+          },
+          "pagesTouched": {
+            "type": "array",
+            "description": "Doc file paths created or edited during this run.",
+            "items": { "type": "string" }
+          },
+          "summary": {
+            "type": "string",
+            "description": "One-line human-readable summary of the documentation change, from the agent's classification."
           }
         }
       }

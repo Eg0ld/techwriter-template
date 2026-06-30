@@ -10,12 +10,31 @@
   ],
   "runLog": [
     {
-      "runId": "2026-05-28T12-04-00Z-7f3a1c",
-      "prsAnalyzed": 3,
+      "runId": "14203956201-1",
+      "prsAnalyzed": 1,
       "gapsFound": 1,
       "docsChanged": 2,
       "errors": 0,
-      "at": "2026-05-28T12:04:00Z"
+      "at": "2026-05-28T12:04:00Z",
+      "sourcePr": 128,
+      "sourceRepo": "owner/name",
+      "docPr": 3,
+      "pagesTouched": ["docs/api/reference.md", "docs/changelog.md"],
+      "summary": "Updated API reference to document the new --verbose flag added in #128."
+    },
+    {
+      "runId": "14198000001-1",
+      "prsAnalyzed": 1,
+      "gapsFound": 0,
+      "docsChanged": 0,
+      "errors": 0,
+      "at": "2026-05-25T09:12:00Z",
+      "sourcePr": 127,
+      "sourceRepo": "owner/name",
+      "docPr": null,
+      "pagesTouched": [],
+      "summary": "",
+      "stoppedReason": "no_work"
     }
   ]
 }

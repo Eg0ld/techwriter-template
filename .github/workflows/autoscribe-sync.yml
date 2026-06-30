@@ -305,6 +305,14 @@ jobs:
           TS="$(date -u +%FT%TZ)"
           RUN_ID="${{ github.run_id }}-${{ github.run_attempt }}"
 
+          # Capture pages the agent touched (unstaged at this point) and
+          # the one-line summary from the classification file.
+          DOCS_DIR="${{ steps.cfg.outputs.docs_dir }}"
+          PAGES_JSON=$(git status --short "$DOCS_DIR" 2>/dev/null \
+            | awk '{print $2}' \
+            | jq -Rs '[split("\n")[] | select(. != "")]')
+          SUMMARY=$(jq -r '.summary // ""' /tmp/autoscribe-classification.json 2>/dev/null || echo "")
+
           jq \
             --argjson pr "${IN_PR}" \
             --arg id "$ID" \
@@ -313,14 +321,18 @@ jobs:
             --arg ts "$TS" \
             --arg runId "$RUN_ID" \
             --argjson gaps "$GAPS" \
+            --arg watched "$WATCHED" \
+            --argjson pages "$PAGES_JSON" \
+            --arg summary "$SUMMARY" \
             '.version = (.version // 1)
              | .cursor.lastProcessedPr = ([(.cursor.lastProcessedPr // 0), $pr] | max)
              | .cursor.lastProcessedMergedAt = $ts
-             # upsert the queue entry for this PR (replace any prior entry with same id)
              | .queue = ((.queue // []) | map(select(.id != $id)))
                         + [{id:$id, status:$status, gapType:$gap, updatedAt:$ts}]
              | .runLog += [{runId:$runId, prsAnalyzed:1, gapsFound:$gaps,
-                            docsChanged:0, errors:0, at:$ts}]' \
+                            docsChanged:($pages | length), errors:0, at:$ts,
+                            sourcePr:$pr, sourceRepo:$watched,
+                            pagesTouched:$pages, summary:$summary}]' \
             "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
 
       # 7a) NO_GAP fast-path: just commit the advanced cursor/run-log and stop.
@@ -392,4 +404,79 @@ jobs:
             echo "Opened rolling draft PR for $UPDATES_BRANCH."
           else
             echo "Rolling draft PR already open — pushed commits to it."
+          fi
+
+      # 7c) Patch docPr into the run-log entry now that we know the PR number,
+      #     then regenerate changelog.md and push one final commit.
+      - name: Patch docPr and publish changelog
+        if: ${{ steps.state.outputs.gap != 'NO_GAP' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WATCHED: ${{ steps.cfg.outputs.watched }}
+          DOCS_DIR: ${{ steps.cfg.outputs.docs_dir }}
+        run: |
+          set -euo pipefail
+          RUN_ID="${{ github.run_id }}-${{ github.run_attempt }}"
+          STATE=.autoscribe/state.json
+
+          # Resolve the open draft PR number (just created or pre-existing).
+          DOC_PR=$(gh pr list --head "$UPDATES_BRANCH" --state open \
+            --json number --jq '.[0].number // empty')
+
+          # Patch docPr into this run's state entry (idempotent — safe to rerun).
+          if [ -n "$DOC_PR" ]; then
+            jq --argjson docPr "$DOC_PR" --arg runId "$RUN_ID" \
+              '.runLog = [.runLog[] | if .runId == $runId then . + {docPr: $docPr} else . end]' \
+              "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+          fi
+
+          # Generate changelog.md from the now-complete runLog.
+          DOCS_DIR_LOCAL="$DOCS_DIR"
+          python3 - << 'PYEOF'
+import json, os, sys
+state_path = ".autoscribe/state.json"
+docs_dir   = os.environ.get("DOCS_DIR_LOCAL", "docs")
+changelog  = os.path.join(docs_dir, "changelog.md")
+try:
+    state = json.load(open(state_path))
+except Exception:
+    sys.exit(0)
+entries = [e for e in state.get("runLog", []) if e.get("gapsFound", 0) > 0]
+if not entries:
+    sys.exit(0)
+lines = [
+    "---\nsidebar_label: Changelog\nsidebar_position: 999\n---\n\n",
+    "# Changelog\n\n",
+    "_Auto-generated — each entry traces a source PR to the doc changes it produced._\n\n",
+]
+for e in reversed(entries):
+    date     = e.get("at", "")[:10]
+    src_repo = e.get("sourceRepo", "")
+    src_pr   = e.get("sourcePr")
+    doc_pr   = e.get("docPr")
+    summary  = e.get("summary") or "Documentation updated."
+    pages    = e.get("pagesTouched", [])
+    lines.append(f"## {date}\n\n")
+    lines.append(f"{summary}\n\n")
+    refs = []
+    if src_repo and src_pr:
+        refs.append(f"[{src_repo}#{src_pr}](https://github.com/{src_repo}/pull/{src_pr})")
+    if doc_pr:
+        refs.append(f"[Doc PR #{doc_pr}](../../pull/{doc_pr})")
+    if refs:
+        lines.append("**Source:** " + " · ".join(refs) + "\n\n")
+    if pages:
+        lines.append("**Pages updated:**\n\n")
+        for p in pages:
+            lines.append(f"- `{p}`\n")
+        lines.append("\n")
+os.makedirs(docs_dir, exist_ok=True)
+open(changelog, "w").write("".join(lines))
+print(f"Changelog written to {changelog} ({len(entries)} entries)")
+PYEOF
+
+          git add "$STATE" "$DOCS_DIR/changelog.md" 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(autoscribe): patch docPr + changelog for $WATCHED#${IN_PR}"
+            git push origin "$UPDATES_BRANCH"
           fi
