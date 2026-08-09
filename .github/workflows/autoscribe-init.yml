@@ -73,12 +73,19 @@ jobs:
           # the same prompt + sandbox env, and which brings its OWN model credential.
           # Anything else fails loudly so a typo can't silently no-op.
           AGENT_CMD=$(jq -r '.agent.command // ""' "$CFG")
+          BASE_URL=$(jq -r '.agent.baseUrl // ""' "$CFG")
           case "$RUNTIME" in
             claude-code) ;;
+            gateway)
+              # Built-in runtime, owner-hosted endpoint (local/self-hosted model).
+              test -n "$BASE_URL" \
+                || { echo "::error::agent.runtime 'gateway' requires agent.baseUrl in .autoscribe/config.json"; exit 1; }
+              echo "$BASE_URL" | grep -Eq '^https?://[A-Za-z0-9._~:/?#@!$&'"'"'()*+,;=%-]+$' \
+                || { echo "::error::agent.baseUrl '$BASE_URL' is not a valid http(s) URL"; exit 1; } ;;
             custom)
               test -n "$AGENT_CMD" \
                 || { echo "::error::agent.runtime 'custom' requires agent.command in .autoscribe/config.json"; exit 1; } ;;
-            *) echo "::error::agent.runtime '$RUNTIME' not supported (use 'claude-code' or 'custom')"; exit 1 ;;
+            *) echo "::error::agent.runtime '$RUNTIME' not supported (use 'claude-code', 'gateway', or 'custom')"; exit 1 ;;
           esac
           {
             echo "watched=$WATCHED"
@@ -86,6 +93,7 @@ jobs:
             echo "init_model=$INIT_MODEL"
             echo "max_turns=$MAX_TURNS"
             echo "runtime=$RUNTIME"
+            echo "base_url=$BASE_URL"
             echo "agent_cmd<<__AUTOSCRIBE_CMD__"
             echo "$AGENT_CMD"
             echo "__AUTOSCRIBE_CMD__"
@@ -110,7 +118,9 @@ jobs:
           node-version: 20
 
       - name: Install Claude Code CLI
-        if: ${{ steps.cfg.outputs.runtime == 'claude-code' }}
+        # Needed by both built-in adapters: 'gateway' runs the same CLI, only
+        # pointed at the owner's own endpoint. Skipped for 'custom'.
+        if: ${{ steps.cfg.outputs.runtime == 'claude-code' || steps.cfg.outputs.runtime == 'gateway' }}
         run: npm install -g @anthropic-ai/claude-code
 
       # 4) Run the agent headless.
@@ -127,6 +137,8 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          AUTOSCRIBE_GATEWAY_TOKEN: ${{ secrets.AUTOSCRIBE_GATEWAY_TOKEN }}
+          BASE_URL: ${{ steps.cfg.outputs.base_url }}
           WATCHED_PATH: ${{ github.workspace }}/.watched
           DOCS_DIR: ${{ steps.cfg.outputs.docs_dir }}
           WATCHED_REPO: ${{ steps.cfg.outputs.watched }}
@@ -178,8 +190,26 @@ jobs:
             # CLAUDE_CODE_OAUTH_TOKEN when present, else ANTHROPIC_API_KEY.
             [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || unset CLAUDE_CODE_OAUTH_TOKEN
             [ -n "${ANTHROPIC_API_KEY:-}" ] || unset ANTHROPIC_API_KEY
-            if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-              echo "::error::No model credential found. Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN as an Actions secret."
+
+            if [ "$RUNTIME" = "gateway" ]; then
+              # ── Gateway adapter ────────────────────────────────────────────
+              # Same CLI, same sandbox, same flags — only the endpoint changes.
+              # ANTHROPIC_BASE_URL points the runtime at an Anthropic-compatible
+              # endpoint the owner hosts (LiteLLM/claude-code-router/vLLM in front
+              # of a local or self-hosted model), so no request reaches Anthropic.
+              # Anthropic credentials are dropped so they can neither be sent to a
+              # third-party endpoint nor shadow the gateway token.
+              unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY
+              export ANTHROPIC_BASE_URL="$BASE_URL"
+              # Optional: an endpoint on your own network often needs no credential.
+              if [ -n "${AUTOSCRIBE_GATEWAY_TOKEN:-}" ]; then
+                export ANTHROPIC_AUTH_TOKEN="$AUTOSCRIBE_GATEWAY_TOKEN"
+              else
+                echo "::notice::No AUTOSCRIBE_GATEWAY_TOKEN set — calling $BASE_URL unauthenticated."
+              fi
+              echo "Using gateway runtime at $BASE_URL (model=$INIT_MODEL)"
+            elif [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+              echo "::error::No model credential found. Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN as an Actions secret, or use agent.runtime 'gateway' to point at your own endpoint."
               exit 1
             fi
             claude -p "$PROMPT" \
