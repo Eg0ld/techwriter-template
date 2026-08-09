@@ -8,6 +8,13 @@ updates:
     groups:
       minor-and-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      # TS 7.x removed `baseUrl`, which @docusaurus/tsconfig (3.10.x) still sets.
+      # `npm run typecheck` fails under TS7 no matter what this repo's own
+      # tsconfig.json says. Every tenant repo inherits this config, so keep the
+      # pin until Docusaurus ships a TS7-compatible tsconfig.
+      - dependency-name: "typescript"
+        versions: [">=7.0.0"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
