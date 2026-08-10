@@ -31,9 +31,13 @@
       "properties": {
         "voice": {
           "type": "string",
-          "description": "Desired writing voice / tone for generated docs.",
+          "description": "Desired writing voice / tone for generated docs. Free text — it is handed to the editorial pass as guidance. Two values are recognised specially: `simplified technical english` (or `ASD-STE100`) switches the editorial pass into controlled-language mode, which caps sentence length, requires the imperative for instructions, bans the passive voice, and applies STE word substitutions; anything else is treated as ordinary tone guidance on top of the default house style.",
           "default": "plain technical English",
-          "examples": ["plain technical English", "friendly and concise"]
+          "examples": [
+            "plain technical English",
+            "friendly and concise",
+            "simplified technical english"
+          ]
         },
         "audience": {
           "type": "string",
