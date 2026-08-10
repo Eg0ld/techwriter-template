@@ -1,6 +1,15 @@
 # Dependencies
 /node_modules
 
+# Deliberately NOT committed. The Pages/init workflows use `npm install`, not
+# `npm ci`, so no lockfile is required to build. Leaving it out means each tenant
+# repo resolves fresh at provisioning time and picks up patched transitives
+# automatically, rather than inheriting whatever tree this template was pinned to
+# on the day it was last touched. The known-vulnerable transitives are held down
+# by the `overrides` block in package.json, which applies with or without a lock.
+# Revisit if a workflow ever switches to `npm ci`, which requires one.
+/package-lock.json
+
 # Production build output
 /build
 
