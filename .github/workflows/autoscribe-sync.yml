@@ -104,23 +104,40 @@ jobs:
           # Per-PR work uses the default model (Sonnet); maxTurns caps cost.
           SYNC_MODEL=$(jq -r '.model // "sonnet"' "$CFG")
           MAX_TURNS=$(jq -r '.maxTurns // 40' "$CFG")
+          # Soft spend ceiling. maxTurns is the hard stop (it cuts the agent off
+          # mid-run); this is the observed-spend check applied AFTER the run, so a
+          # breach is recorded and surfaced rather than silently absorbed.
+          SPEND_CEILING=$(jq -r '.spendCeilingUSD // 10' "$CFG")
           RUNTIME=$(jq -r '.agent.runtime // "claude-code"' "$CFG")
-          # Agent runtime adapters: "claude-code" is built-in; "custom" runs the
-          # owner-supplied agent.command (bring-your-own-agent). Anything else fails.
+          # Agent runtime adapters: "claude-code" is built-in; "gateway" is the
+          # built-in runtime pointed at an Anthropic-compatible endpoint the owner
+          # hosts (local/self-hosted model); "custom" runs the owner-supplied
+          # agent.command (bring-your-own-agent). Anything else fails.
           AGENT_CMD=$(jq -r '.agent.command // ""' "$CFG")
+          BASE_URL=$(jq -r '.agent.baseUrl // ""' "$CFG")
           case "$RUNTIME" in
             claude-code) ;;
+            gateway)
+              test -n "$BASE_URL" \
+                || { echo "::error::agent.runtime 'gateway' requires agent.baseUrl in .autoscribe/config.json"; exit 1; }
+              # baseUrl is owner-supplied config, but it is exported into the agent
+              # step's environment — require a plain http(s) URL so it cannot carry
+              # shell metacharacters or a non-network scheme.
+              echo "$BASE_URL" | grep -Eq '^https?://[A-Za-z0-9._~:/?#@!$&'"'"'()*+,;=%-]+$' \
+                || { echo "::error::agent.baseUrl '$BASE_URL' is not a valid http(s) URL"; exit 1; } ;;
             custom)
               test -n "$AGENT_CMD" \
                 || { echo "::error::agent.runtime 'custom' requires agent.command in .autoscribe/config.json"; exit 1; } ;;
-            *) echo "::error::agent.runtime '$RUNTIME' not supported (use 'claude-code' or 'custom')"; exit 1 ;;
+            *) echo "::error::agent.runtime '$RUNTIME' not supported (use 'claude-code', 'gateway', or 'custom')"; exit 1 ;;
           esac
           {
             echo "watched=$WATCHED"
             echo "docs_dir=$DOCS_DIR"
             echo "sync_model=$SYNC_MODEL"
             echo "max_turns=$MAX_TURNS"
+            echo "spend_ceiling=$SPEND_CEILING"
             echo "runtime=$RUNTIME"
+            echo "base_url=$BASE_URL"
             echo "agent_cmd<<__AUTOSCRIBE_CMD__"
             echo "$AGENT_CMD"
             echo "__AUTOSCRIBE_CMD__"
@@ -157,7 +174,9 @@ jobs:
           node-version: 20
 
       - name: Install Claude Code CLI
-        if: ${{ steps.cfg.outputs.runtime == 'claude-code' }}
+        # Needed by both built-in adapters: 'gateway' runs the same CLI, only
+        # pointed at the owner's own endpoint. Skipped for 'custom'.
+        if: ${{ steps.cfg.outputs.runtime == 'claude-code' || steps.cfg.outputs.runtime == 'gateway' }}
         run: npm install -g @anthropic-ai/claude-code
 
       # 4) Work on the rolling branch so the agent edits the draft's working tree.
@@ -209,6 +228,8 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          AUTOSCRIBE_GATEWAY_TOKEN: ${{ secrets.AUTOSCRIBE_GATEWAY_TOKEN }}
+          BASE_URL: ${{ steps.cfg.outputs.base_url }}
           DOCS_DIR: ${{ steps.cfg.outputs.docs_dir }}
           WATCHED_REPO: ${{ steps.cfg.outputs.watched }}
           SYNC_MODEL: ${{ steps.cfg.outputs.sync_model }}
@@ -263,8 +284,28 @@ jobs:
             # Keep exactly the configured credential (see job env note).
             [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || unset CLAUDE_CODE_OAUTH_TOKEN
             [ -n "${ANTHROPIC_API_KEY:-}" ] || unset ANTHROPIC_API_KEY
-            if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-              echo "::error::No model credential found. Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN as an Actions secret."
+
+            if [ "$RUNTIME" = "gateway" ]; then
+              # ── Gateway adapter ────────────────────────────────────────────
+              # Same CLI, same sandbox, same flags — only the endpoint changes.
+              # ANTHROPIC_BASE_URL points the runtime at an Anthropic-compatible
+              # endpoint the owner hosts (LiteLLM/claude-code-router/vLLM in front
+              # of a local or self-hosted model), so no request reaches Anthropic.
+              # Anthropic credentials are dropped so they can neither be sent to a
+              # third-party endpoint nor shadow the gateway token.
+              unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY
+              export ANTHROPIC_BASE_URL="$BASE_URL"
+              # The token is OPTIONAL: an endpoint on your own network often needs
+              # none. Set it only when provided, so an empty secret isn't sent as a
+              # literal empty bearer token.
+              if [ -n "${AUTOSCRIBE_GATEWAY_TOKEN:-}" ]; then
+                export ANTHROPIC_AUTH_TOKEN="$AUTOSCRIBE_GATEWAY_TOKEN"
+              else
+                echo "::notice::No AUTOSCRIBE_GATEWAY_TOKEN set — calling $BASE_URL unauthenticated."
+              fi
+              echo "Using gateway runtime at $BASE_URL (model=$SYNC_MODEL)"
+            elif [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+              echo "::error::No model credential found. Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN as an Actions secret, or use agent.runtime 'gateway' to point at your own endpoint."
               exit 1
             fi
             claude -p "$PROMPT" \
@@ -286,10 +327,30 @@ jobs:
         id: state
         env:
           WATCHED: ${{ steps.cfg.outputs.watched }}
+          SPEND_CEILING: ${{ steps.cfg.outputs.spend_ceiling }}
         run: |
           set -euo pipefail
           STATE=.autoscribe/state.json
           test -f "$STATE" || echo '{"version":1,"cursor":{"lastProcessedPr":null},"queue":[],"runLog":[]}' > "$STATE"
+
+          # Observed spend for this run. The claude-code CLI reports it as
+          # `total_cost_usd` in the --output-format json envelope we tee'd to
+          # /tmp/sync-result.json. A custom runtime may write the same key there;
+          # if it reports nothing we record null rather than guessing zero.
+          SPEND=$(jq -r '.total_cost_usd // empty' /tmp/sync-result.json 2>/dev/null || true)
+          case "$SPEND" in
+            ''|*[!0-9.]*) SPEND_JSON=null ;;
+            *) SPEND_JSON="$SPEND" ;;
+          esac
+
+          # Soft ceiling: this run has already finished and been paid for, so the
+          # breach cannot be prevented retroactively — it is recorded in the run
+          # log and raised as a workflow warning so the owner sees it. maxTurns is
+          # what actually bounds a single run.
+          if [ "$SPEND_JSON" != "null" ] \
+             && awk -v s="$SPEND_JSON" -v c="$SPEND_CEILING" 'BEGIN{exit !(s>c)}'; then
+            echo "::warning::Run spent \$$SPEND_JSON, over the \$$SPEND_CEILING spendCeilingUSD ceiling. Lower maxTurns or raise the ceiling in .autoscribe/config.json."
+          fi
 
           # Read the agent's classification; default to NO_GAP if it wrote nothing.
           GAP=$(jq -r '.gap_type // "NO_GAP"' /tmp/autoscribe-classification.json 2>/dev/null || echo NO_GAP)
@@ -324,6 +385,7 @@ jobs:
             --arg watched "$WATCHED" \
             --argjson pages "$PAGES_JSON" \
             --arg summary "$SUMMARY" \
+            --argjson spend "$SPEND_JSON" \
             '.version = (.version // 1)
              | .cursor.lastProcessedPr = ([(.cursor.lastProcessedPr // 0), $pr] | max)
              | .cursor.lastProcessedMergedAt = $ts
@@ -332,7 +394,8 @@ jobs:
              | .runLog += [{runId:$runId, prsAnalyzed:1, gapsFound:$gaps,
                             docsChanged:($pages | length), errors:0, at:$ts,
                             sourcePr:$pr, sourceRepo:$watched,
-                            pagesTouched:$pages, summary:$summary}]' \
+                            pagesTouched:$pages, summary:$summary}
+                           + (if $spend == null then {} else {spendUSD:$spend} end)]' \
             "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
 
       # 7a) NO_GAP fast-path: just commit the advanced cursor/run-log and stop.
@@ -430,50 +493,51 @@ jobs:
               "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
           fi
 
-          # Generate changelog.md from the now-complete runLog.
-          DOCS_DIR_LOCAL="$DOCS_DIR"
+          # Generate changelog.md from the now-complete runLog. DOCS_DIR comes
+          # from this step's `env:` block, so it is already exported and visible
+          # to the Python below.
           python3 - << 'PYEOF'
-import json, os, sys
-state_path = ".autoscribe/state.json"
-docs_dir   = os.environ.get("DOCS_DIR_LOCAL", "docs")
-changelog  = os.path.join(docs_dir, "changelog.md")
-try:
-    state = json.load(open(state_path))
-except Exception:
-    sys.exit(0)
-entries = [e for e in state.get("runLog", []) if e.get("gapsFound", 0) > 0]
-if not entries:
-    sys.exit(0)
-lines = [
-    "---\nsidebar_label: Changelog\nsidebar_position: 999\n---\n\n",
-    "# Changelog\n\n",
-    "_Auto-generated — each entry traces a source PR to the doc changes it produced._\n\n",
-]
-for e in reversed(entries):
-    date     = e.get("at", "")[:10]
-    src_repo = e.get("sourceRepo", "")
-    src_pr   = e.get("sourcePr")
-    doc_pr   = e.get("docPr")
-    summary  = e.get("summary") or "Documentation updated."
-    pages    = e.get("pagesTouched", [])
-    lines.append(f"## {date}\n\n")
-    lines.append(f"{summary}\n\n")
-    refs = []
-    if src_repo and src_pr:
-        refs.append(f"[{src_repo}#{src_pr}](https://github.com/{src_repo}/pull/{src_pr})")
-    if doc_pr:
-        refs.append(f"[Doc PR #{doc_pr}](../../pull/{doc_pr})")
-    if refs:
-        lines.append("**Source:** " + " · ".join(refs) + "\n\n")
-    if pages:
-        lines.append("**Pages updated:**\n\n")
-        for p in pages:
-            lines.append(f"- `{p}`\n")
-        lines.append("\n")
-os.makedirs(docs_dir, exist_ok=True)
-open(changelog, "w").write("".join(lines))
-print(f"Changelog written to {changelog} ({len(entries)} entries)")
-PYEOF
+          import json, os, sys
+          state_path = ".autoscribe/state.json"
+          docs_dir   = os.environ.get("DOCS_DIR", "docs")
+          changelog  = os.path.join(docs_dir, "changelog.md")
+          try:
+              state = json.load(open(state_path))
+          except Exception:
+              sys.exit(0)
+          entries = [e for e in state.get("runLog", []) if e.get("gapsFound", 0) > 0]
+          if not entries:
+              sys.exit(0)
+          lines = [
+              "---\nsidebar_label: Changelog\nsidebar_position: 999\n---\n\n",
+              "# Changelog\n\n",
+              "_Auto-generated — each entry traces a source PR to the doc changes it produced._\n\n",
+          ]
+          for e in reversed(entries):
+              date     = e.get("at", "")[:10]
+              src_repo = e.get("sourceRepo", "")
+              src_pr   = e.get("sourcePr")
+              doc_pr   = e.get("docPr")
+              summary  = e.get("summary") or "Documentation updated."
+              pages    = e.get("pagesTouched", [])
+              lines.append(f"## {date}\n\n")
+              lines.append(f"{summary}\n\n")
+              refs = []
+              if src_repo and src_pr:
+                  refs.append(f"[{src_repo}#{src_pr}](https://github.com/{src_repo}/pull/{src_pr})")
+              if doc_pr:
+                  refs.append(f"[Doc PR #{doc_pr}](../../pull/{doc_pr})")
+              if refs:
+                  lines.append("**Source:** " + " · ".join(refs) + "\n\n")
+              if pages:
+                  lines.append("**Pages updated:**\n\n")
+                  for p in pages:
+                      lines.append(f"- `{p}`\n")
+                  lines.append("\n")
+          os.makedirs(docs_dir, exist_ok=True)
+          open(changelog, "w").write("".join(lines))
+          print(f"Changelog written to {changelog} ({len(entries)} entries)")
+          PYEOF
 
           git add "$STATE" "$DOCS_DIR/changelog.md" 2>/dev/null || true
           if ! git diff --cached --quiet; then

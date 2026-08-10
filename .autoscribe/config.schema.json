@@ -31,9 +31,13 @@
       "properties": {
         "voice": {
           "type": "string",
-          "description": "Desired writing voice / tone for generated docs.",
+          "description": "Desired writing voice / tone for generated docs. Free text — it is handed to the editorial pass as guidance. Two values are recognised specially: `simplified technical english` (or `ASD-STE100`) switches the editorial pass into controlled-language mode, which caps sentence length, requires the imperative for instructions, bans the passive voice, and applies STE word substitutions; anything else is treated as ordinary tone guidance on top of the default house style.",
           "default": "plain technical English",
-          "examples": ["plain technical English", "friendly and concise"]
+          "examples": [
+            "plain technical English",
+            "friendly and concise",
+            "simplified technical english"
+          ]
         },
         "audience": {
           "type": "string",
@@ -55,6 +59,12 @@
       "default": "opus",
       "examples": ["opus", "sonnet"]
     },
+    "maxTurns": {
+      "type": "integer",
+      "description": "Hard cap on agent turns for a single run, passed to the runtime as `--max-turns`. This is the cost control the workflows actually enforce: the agent is cut off once it hits the cap, whatever it has spent. Defaults differ by workflow — the per-PR sync uses 40, the one-time initial build uses 200 — so leave this unset unless you have a reason to override both.",
+      "minimum": 1,
+      "examples": [40, 200]
+    },
     "waveSize": {
       "type": "integer",
       "description": "Maximum number of parallel sub-agents per wave during fan-out (e.g. the initial build's one-section-per-agent pass). Caps concurrency to keep cost and rate-limit pressure predictable. Ported from the reference pipeline's wave-based concurrency guard.",
@@ -75,9 +85,15 @@
       "properties": {
         "runtime": {
           "type": "string",
-          "description": "The coding-agent CLI the workflows install and invoke to read the code and write the docs. `claude-code` (Anthropic's @anthropic-ai/claude-code) is the built-in, fully-supported runtime. `custom` is the bring-your-own-agent runtime: the workflow runs `agent.command` (any CLI — openclaw, nanoclaw, a local Ollama-backed agent, …) with the task in $AUTOSCRIBE_PROMPT and the standard paths, and the command brings its own model credential. Any other value fails the run with a clear error rather than silently mis-running.",
-          "enum": ["claude-code", "custom"],
+          "description": "The coding-agent CLI the workflows install and invoke to read the code and write the docs. `claude-code` (Anthropic's @anthropic-ai/claude-code) is the built-in, fully-supported runtime, talking to Anthropic's API. `gateway` runs that same built-in runtime against an Anthropic-compatible endpoint you host instead — a local or self-hosted model behind LiteLLM, claude-code-router, vLLM, or a cloud gateway — configured with `agent.baseUrl`; you keep the whole proven agent loop and only swap where the tokens come from. `custom` is the bring-your-own-agent runtime: the workflow runs `agent.command` (any CLI — openclaw, nanoclaw, your own script) with the task in $AUTOSCRIBE_PROMPT and the standard paths, and the command brings its own model credential. Any other value fails the run with a clear error rather than silently mis-running.",
+          "enum": ["claude-code", "gateway", "custom"],
           "default": "claude-code"
+        },
+        "baseUrl": {
+          "type": "string",
+          "description": "Required when `runtime` is `gateway`: the base URL of an Anthropic-compatible endpoint, passed to the built-in runtime as ANTHROPIC_BASE_URL. The endpoint must speak Anthropic's Messages API — a proxy such as LiteLLM, claude-code-router, or Bifrost puts that shape in front of Ollama, vLLM, llama.cpp, OpenAI-compatible servers, and most hosted providers. IMPORTANT: the URL is resolved from the GitHub Actions runner, not from your laptop. A GitHub-hosted runner cannot reach `localhost` or a private LAN address — for a truly local model, either run a self-hosted runner on the same network or expose the endpoint through a tunnel. Ignored unless `runtime` is `gateway`.",
+          "format": "uri",
+          "examples": ["https://litellm.internal.example.com", "http://10.0.0.14:4000", "https://gateway.example.com/anthropic"]
         },
         "command": {
           "type": "string",
@@ -86,8 +102,8 @@
         },
         "auth": {
           "type": "string",
-          "description": "How the runtime authenticates. `api_key` uses the ANTHROPIC_API_KEY repo secret (metered, pay-per-token). `subscription` uses the CLAUDE_CODE_OAUTH_TOKEN repo secret — a Claude Pro/Max subscription token from `claude setup-token` — billed against the subscription instead of the API, subject to its rate limits. Ignored when `runtime` is `custom` (your command manages its own auth).",
-          "enum": ["api_key", "subscription"],
+          "description": "How the runtime authenticates. `api_key` uses the ANTHROPIC_API_KEY repo secret (metered, pay-per-token). `subscription` uses the CLAUDE_CODE_OAUTH_TOKEN repo secret — a Claude Pro/Max subscription token from `claude setup-token` — billed against the subscription instead of the API, subject to its rate limits. `gateway` uses the AUTOSCRIBE_GATEWAY_TOKEN repo secret as a bearer token for your `agent.baseUrl` endpoint, and is the only value allowed when `runtime` is `gateway`; leave that secret unset if your endpoint needs no credential (common for a model on your own network). Ignored when `runtime` is `custom` (your command manages its own auth).",
+          "enum": ["api_key", "subscription", "gateway"],
           "default": "api_key"
         }
       }

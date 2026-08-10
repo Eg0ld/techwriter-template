@@ -52,7 +52,9 @@ merge pull requests. Everything else is GitHub-native:
 - **Content** = Markdown/MDX under `docs/` (git is the source of truth).
 - **The agent** = Claude Code, running inside **GitHub Actions**.
 - **Compute/API key** = your own `ANTHROPIC_API_KEY`, stored as an encrypted
-  **repo secret**. The platform never holds it.
+  **repo secret**. The platform never holds it. Or skip Anthropic entirely and
+  point the same engine at a model you host — see
+  [Choosing an agent runtime](#choosing-an-agent-runtime).
 - **The review surface** = a **GitHub Pull Request**. No custom review UI.
 - **Hosting** = **GitHub Pages**, redeployed automatically on merge.
 - **State** = a single committed `.autoscribe/state.json` + git history.
@@ -240,47 +242,106 @@ variables → Actions → *Variables*) or in `.autoscribe/config.json` (below).
 This file is the project's contract. It travels with the repo, so the whole
 configuration is portable. Example:
 
+The authoritative field list is [`.autoscribe/config.schema.json`](.autoscribe/config.schema.json),
+which ships alongside it — point your editor at it for inline validation and
+docs on every key.
+
 ```json
 {
-  "version": 1,
+  "$schema": "./config.schema.json",
   "watchedRepo": "kibook/s1kd-tools",
-  "watchedBranch": "main",
   "docsDir": "docs",
-  "site": {
-    "audience": "developer",
-    "style": "concise, second-person, active voice",
-    "sections": ["Introduction", "Core Concepts", "Guides", "Reference"]
+  "style": {
+    "voice": "plain technical English",
+    "audience": "developer"
   },
+  "model": "sonnet",
+  "initModel": "opus",
+  "maxTurns": 40,
+  "waveSize": 8,
+  "spendCeilingUSD": 10,
   "agent": {
-    "model": "claude-sonnet-4-5",
-    "initModel": "claude-opus-4-1",
-    "maxWaveConcurrency": 6,
-    "perRunSpendCeilingUsd": 5,
-    "dryRunInitialBuild": false
-  },
-  "draft": {
-    "branch": "autoscribe/updates",
-    "prTitle": "📚 Docs updates",
-    "openAsDraft": true
+    "runtime": "claude-code",
+    "auth": "api_key"
   }
 }
 ```
 
-| Key                                | What it controls                                                                 |
-|------------------------------------|----------------------------------------------------------------------------------|
-| `watchedRepo`                      | `owner/name` of the code repo to document. **One watched repo per docs site.**   |
-| `watchedBranch`                    | Branch whose merged PRs trigger sync (default `main`).                            |
-| `docsDir`                          | Where generated Markdown lives (default `docs`).                                  |
-| `site.audience` / `style`          | Voice and reader the editorial pass writes for.                                  |
-| `site.sections`                    | Hints for the top-level information architecture during `autoscribe-init`.       |
-| `agent.model` / `initModel`        | Per-PR model vs the stronger model used only for the one-time initial build.     |
-| `agent.maxWaveConcurrency`         | Cap on parallel sub-agents per wave — the main cost guardrail.                   |
-| `agent.perRunSpendCeilingUsd`      | Pause + log if a run would exceed this. Protects your Anthropic bill.            |
-| `agent.dryRunInitialBuild`         | If `true`, the first build previews the IA without writing pages.                |
-| `draft.branch` / `prTitle`         | The rolling branch and standing Draft PR title.                                  |
-| `draft.openAsDraft`                | Keep the accumulating PR in Draft until you mark it ready.                        |
+| Key                          | What it controls                                                                        |
+|------------------------------|-----------------------------------------------------------------------------------------|
+| `watchedRepo`                | `owner/name` of the code repo to document. **One watched repo per docs site.** Required. |
+| `docsDir`                    | Where generated Markdown lives (default `docs`).                                          |
+| `style.voice` / `.audience`  | Voice and reader the editorial pass writes for.                                           |
+| `model`                      | Model for per-PR sync work — the common, cost-sensitive path.                              |
+| `initModel`                  | Model for the one-time full-repo initial build, where capability is worth the cost.       |
+| `maxTurns`                   | Hard cap on agent turns per run, passed as `--max-turns`. **The cost control the workflows actually enforce.** Defaults differ per workflow (sync 40, init 200). |
+| `waveSize`                   | Intended cap on parallel sub-agents per wave.                                             |
+| `spendCeilingUSD`            | Soft ceiling. Checked *after* a run against the observed cost; a breach is recorded in the run log and raised as a workflow warning. `maxTurns` is what bounds a run in progress. |
+| `agent.runtime`              | Which agent runs: `claude-code`, `gateway`, or `custom` — see below.                      |
+| `agent.auth`                 | `api_key` → `ANTHROPIC_API_KEY`; `subscription` → `CLAUDE_CODE_OAUTH_TOKEN`; `gateway` → `AUTOSCRIBE_GATEWAY_TOKEN`. |
+| `agent.baseUrl`              | Required for `gateway`: the Anthropic-compatible endpoint to call.                        |
+| `agent.command`              | Required for `custom`: the shell command that runs your own agent.                        |
 
-Anything secret (the API key) is **not** in this file — it is a repo secret.
+Anything secret is **not** in this file — credentials are repo secrets.
+
+---
+
+## Choosing an agent runtime
+
+You do not have to use Anthropic's API. `agent.runtime` picks one of three, and
+all three run under the same sandbox: no GitHub token in the agent's
+environment, no Bash tool, and the watched repo framed as untrusted data.
+
+### `claude-code` — the built-in default
+
+Anthropic's `@anthropic-ai/claude-code`, talking to Anthropic's API. Set
+`agent.auth` to `api_key` (metered `ANTHROPIC_API_KEY`) or `subscription`
+(`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, billed against a Claude
+Pro/Max plan instead of the API).
+
+### `gateway` — your own model, the same engine
+
+Runs the **same built-in agent loop**, pointed at an endpoint you host. Nothing
+reaches Anthropic. You keep the tool restrictions, the turn cap, the state
+machine, and the draft-PR flow — only the tokens come from somewhere else.
+
+```json
+"model": "qwen2.5-coder:32b",
+"initModel": "qwen2.5-coder:32b",
+"agent": {
+  "runtime": "gateway",
+  "baseUrl": "https://litellm.internal.example.com",
+  "auth": "gateway"
+}
+```
+
+The endpoint must speak **Anthropic's Messages API**. A proxy puts that shape in
+front of nearly anything — [LiteLLM](https://github.com/BerriAI/litellm),
+[claude-code-router](https://github.com/musistudio/claude-code-router), or
+Bifrost in front of Ollama, vLLM, llama.cpp, an OpenAI-compatible server, or a
+hosted provider. `model` / `initModel` become whatever names your gateway
+exposes. Set the `AUTOSCRIBE_GATEWAY_TOKEN` repo secret if your endpoint needs a
+bearer token; leave it unset if it doesn't — a model on your own network usually
+doesn't.
+
+> **Reachability — read this before pointing it at `localhost`.** The endpoint
+> is dialled from a **GitHub Actions runner**, not from your machine. A
+> GitHub-hosted runner cannot reach `localhost`, `127.0.0.1`, or a private LAN
+> address; the run will fail with a connection error. For a genuinely local
+> model, either run a **self-hosted runner** on the same network as the model, or
+> expose the endpoint through a tunnel. "Local model" here means *your* hardware,
+> not *this* laptop.
+
+Because the run stays on your hardware, `spendCeilingUSD` has nothing to meter —
+the cost is your own compute. `maxTurns` still bounds the run.
+
+### `custom` — bring your own agent
+
+Runs `agent.command` — any CLI at all. It receives the task in
+`$AUTOSCRIBE_PROMPT` (and `$AUTOSCRIBE_PROMPT_FILE`), plus
+`$AUTOSCRIBE_WATCHED_PATH`, `$AUTOSCRIBE_DOCS_DIR`, and `$AUTOSCRIBE_MODEL`, and
+brings its own credential. Use this when you want a different agent loop
+entirely; use `gateway` when you just want a different model.
 
 ---
 
@@ -301,6 +362,37 @@ time, or feed it to the platform dashboard via the API. No DB to provision.
 
 ---
 
+## Release notes: `docs/changelog.md`
+
+The sync workflow turns the run log into a reader-facing changelog page, so the
+docs site carries its own release notes. After each run that produced changes,
+step 7c patches the doc PR number back into that run's `runLog` entry and
+regenerates `<docsDir>/changelog.md` from the enriched log — newest first, one
+section per dated run:
+
+```markdown
+## 2026-08-09
+
+documented the new --ignore-invalid-rules flag
+
+**Source:** [owner/name#42](https://github.com/owner/name/pull/42) · [Doc PR #7](../../pull/7)
+
+**Pages updated:**
+
+- `docs/cli/compiling-rules.md`
+```
+
+That gives you a complete audit trail in both directions: every doc change
+traces back to the source PR that caused it, and every source PR traces forward
+to the doc PR that documented it. Runs with no gap are recorded in the run log
+but produce no changelog entry, so the page stays signal-only.
+
+The page is committed onto the rolling `autoscribe/updates` branch alongside the
+doc edits, so it lands in the same review as the content it describes. It is
+generated, so don't hand-edit it — change the `summary` in the run log instead.
+
+---
+
 ## Repository layout
 
 ```
@@ -314,12 +406,19 @@ time, or feed it to the platform dashboard via the API. No DB to provision.
 ├── sidebars.ts                  # autogenerated nav (folders + _category_.json)
 ├── docusaurus.config.ts         # site config (set url/baseUrl for Pages)
 ├── package.json                 # Docusaurus build scripts
+├── LICENSE                      # MIT — this scaffolding is yours to keep and change
 ├── .autoscribe/
 │   ├── config.json              # project config (above)
-│   └── state.json               # cursor + queue + run log
+│   ├── config.schema.json       # authoritative field list for config.json
+│   ├── state.json               # cursor + queue + run log
+│   ├── state.schema.json        # shape of state.json
+│   └── prompts/                 # system prompts appended to the agent per phase
+│       ├── init.md              # one-time full-repo build
+│       ├── analyze.md           # per-PR gap classification
+│       └── editorial.md         # house-style pass
 └── .github/workflows/
     ├── autoscribe-init.yml      # one-time initial build → "📚 Initial documentation" PR
-    ├── autoscribe-sync.yml      # per-merged-PR sync → rolling Draft PR
+    ├── autoscribe-sync.yml      # per-merged-PR sync → rolling Draft PR + changelog
     └── pages-deploy.yml         # build + deploy to GitHub Pages on merge
 ```
 
