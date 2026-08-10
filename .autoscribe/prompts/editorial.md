@@ -22,9 +22,45 @@ rule below explicitly tells you to change them.
 
 Operate on the scope you're given (one page, a section, or all of `docs/`).
 
+## Controlled-language mode (conditional)
+
+If `style.voice` in `.autoscribe/config.json` is **`simplified technical english`**
+or **`ASD-STE100`** (match case-insensitively), the rules in §1 below are
+REPLACED by ASD-STE100 Simplified Technical English:
+
+- **One instruction per sentence** in a procedure. Maximum **20 words** per
+  procedural sentence, **25** for descriptive text.
+- **Imperative for every instruction.** "Remove the panel." Never start an
+  instruction with an -ing word.
+- **Active voice only.** Name the actor. Not "the panel is removed".
+- **One word, one meaning.** Prefer the shortest common word: use *do* not
+  *perform*, *get* not *obtain*, *start* not *initiate* or *commence*, *stop*
+  not *terminate* or *discontinue*, *make sure* not *ensure*, *about* not
+  *approximately* or *regarding*, *before* not *prior to*, *after* not
+  *subsequent to*, *next to* not *adjacent to*, *enough* not *sufficient*,
+  *many* not *numerous*, *need* not *require*, *check* not *verify*, *show* not
+  *indicate* or *demonstrate*, *help* not *assist* or *facilitate*, *part* not
+  *component*, *use* not *utilize* or *employ*, *keep* not *retain*.
+- **Present tense** for descriptions, imperative for actions. No future tense
+  where the present will do.
+- **No noun clusters** longer than three words. Break them with prepositions.
+- **Warnings and cautions before the step they apply to**, never after.
+
+Do NOT apply STE to code samples, identifiers, API names, error strings, or
+quoted output — controlled language governs prose only.
+
+STE is a good fit for procedures, safety-critical instructions, and audiences
+reading in a second language. It is a poor fit for conceptual or persuasive
+prose, so if the site mixes both, apply it to the procedural pages and leave
+narrative pages under the default house style.
+
+---
+
 ## What you check and fix
 
 ### 1. Voice & house style
+
+*(Skipped when controlled-language mode above is active.)*
 
 - **Active voice.** Address the reader as "you". "Run the validator" — not "the
   validator can be run".
