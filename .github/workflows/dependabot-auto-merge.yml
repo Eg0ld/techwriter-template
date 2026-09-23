@@ -1,5 +1,11 @@
 name: Dependabot Auto-merge
 
+# Only semver-patch and semver-minor Dependabot updates (npm and GitHub
+# Actions) may auto-merge. Major updates, and any update whose level
+# Dependabot could not determine, wait for a person to review and merge them.
+# Eligible PRs still merge only once branch protection is satisfied (native
+# auto-merge) or a check suite succeeds (fallback when auto-merge is off).
+
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -15,7 +21,41 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' && github.actor == 'dependabot[bot]'
     steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Decide whether this update may auto-merge
+        id: gate
+        env:
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          UPDATED_DEPS: ${{ steps.meta.outputs.updated-dependencies-json }}
+        run: |
+          eligible=false
+          case "$UPDATE_TYPE" in
+            version-update:semver-patch|version-update:semver-minor)
+              # For a grouped PR, update-type is the highest level in the
+              # group, so a group that contains a major reports semver-major.
+              # A dependency whose level Dependabot could not determine is
+              # left out of that maximum, so also require every dependency
+              # to be a patch or minor update.
+              if jq -e 'length > 0 and all(.[]; .updateType == "version-update:semver-patch" or .updateType == "version-update:semver-minor")' \
+                  <<<"$UPDATED_DEPS" >/dev/null; then
+                eligible=true
+              fi
+              ;;
+          esac
+          echo "eligible=$eligible" >> "$GITHUB_OUTPUT"
+          if [ "$eligible" = true ]; then
+            echo "update-type $UPDATE_TYPE: eligible for auto-merge."
+          else
+            echo "::notice title=Auto-merge held::update-type '${UPDATE_TYPE:-unknown}'. Only semver-patch and semver-minor updates auto-merge; review and merge this PR manually."
+          fi
+
       - name: Enable auto-merge
+        if: steps.gate.outputs.eligible == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -38,6 +78,21 @@ jobs:
           echo "$MERGE_OUTPUT"
           exit "$MERGE_EXIT"
 
+      - name: Cancel auto-merge on updates that are not patch or minor
+        # Also runs when fetch-metadata fails. Dependabot can rewrite an open
+        # PR (for example a group PR), so auto-merge queued by an earlier run
+        # must not survive an update that no longer qualifies.
+        if: ${{ !cancelled() && steps.gate.outputs.eligible != 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ "$(gh pr view "$PR_NUMBER" --repo "$REPO" --json autoMergeRequest --jq '.autoMergeRequest != null')" = "true" ]; then
+            gh pr merge "$PR_NUMBER" --disable-auto --repo "$REPO"
+            echo "Auto-merge cancelled for PR #$PR_NUMBER."
+          fi
+
   auto-merge-on-check-suite:
     runs-on: ubuntu-latest
     if: github.event_name == 'check_suite' && github.event.check_suite.conclusion == 'success'
@@ -57,6 +112,25 @@ jobs:
 
           for PR_NUMBER in "${PR_NUMBERS[@]}"; do
               [ -z "$PR_NUMBER" ] && continue
+
+              # dependabot/fetch-metadata needs a pull_request event, so it
+              # cannot run here. Apply the same rule to the data it reads: the
+              # metadata block in the PR's first commit, which must be
+              # Dependabot's own verified commit. Every dependency listed must
+              # be semver-patch or semver-minor; anything else is held.
+              COMMIT_JSON="$(gh api "repos/${{ github.repository }}/pulls/$PR_NUMBER/commits" --jq '.[0]')"
+              if [ "$(jq -r '"\(.author.login) \(.commit.verification.verified)"' <<<"$COMMIT_JSON")" != "dependabot[bot] true" ]; then
+                echo "::notice::PR #$PR_NUMBER: first commit is not a verified Dependabot commit; not auto-merging."
+                continue
+              fi
+              METADATA="$(jq -r '.commit.message' <<<"$COMMIT_JSON" | sed -n '/^---$/,/^\.\.\.$/p')"
+              DEP_COUNT="$(grep -c '^- dependency-name:' <<<"$METADATA" || true)"
+              OK_COUNT="$(grep -cE '^  update-type: version-update:semver-(patch|minor)$' <<<"$METADATA" || true)"
+              if [ "$DEP_COUNT" -eq 0 ] || [ "$OK_COUNT" -ne "$DEP_COUNT" ]; then
+                echo "::notice::PR #$PR_NUMBER: not a semver-patch/minor-only update; leaving it for manual review."
+                continue
+              fi
+
               set +e
               MERGE_OUTPUT="$(gh pr merge "$PR_NUMBER" --auto --squash --repo "${{ github.repository }}" 2>&1)"
               MERGE_EXIT=$?
