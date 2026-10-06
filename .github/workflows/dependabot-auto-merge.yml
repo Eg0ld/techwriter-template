@@ -19,6 +19,7 @@ permissions:
 jobs:
   auto-merge-on-pr:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     if: github.event_name == 'pull_request' && github.actor == 'dependabot[bot]'
     steps:
       - name: Fetch Dependabot metadata
@@ -95,6 +96,7 @@ jobs:
 
   auto-merge-on-check-suite:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     if: github.event_name == 'check_suite' && github.event.check_suite.conclusion == 'success'
     steps:
       - name: Enable auto-merge on passing Dependabot PRs
