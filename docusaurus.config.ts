@@ -1,6 +1,7 @@
 import {themes as prismThemes} from 'prism-react-renderer';
 import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
+import rehypeSafeHtml from './src/plugins/rehype-safe-html.mjs';
 
 // This file runs in Node.js — don't use client-side code here (browser APIs, JSX…).
 //
@@ -68,6 +69,8 @@ const config: Config = {
           // Single docs instance served at the site root ('/').
           routeBasePath: '/',
           sidebarPath: './sidebars.ts',
+          // Generated pages may not run script on your site.
+          rehypePlugins: [rehypeSafeHtml],
           // Point this at this repo so each page gets an "Edit this page" link.
           editUrl: `https://github.com/${organizationName}/${projectName}/tree/main/`,
         },

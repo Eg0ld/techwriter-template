@@ -130,9 +130,10 @@ All three live in `.github/workflows/` and all three run Claude Code (except
 (languages, structure, READMEs, public API surface, entry points), proposes a
 documentation information architecture, then fans out — capped in **waves** to
 control spend — writing one section of Markdown per part of the codebase. An
-**editorial pass** unifies voice, front-matter, and cross-links. It commits the
-whole `docs/` tree plus `sidebars.ts`/`_category_.json` files to a branch and
-opens a PR titled **"📚 Initial documentation"** for you to review and merge.
+**editorial pass** unifies voice, front-matter, and cross-links. Only `.md` pages
+and `_category_.json` files are accepted from the agent. The first build commits
+them to the default branch and publishes the site; later updates arrive as a
+draft PR for you to review.
 
 Defaults to a stronger model for this one-time broad pass.
 
@@ -288,9 +289,12 @@ Anything secret is **not** in this file — credentials are repo secrets.
 
 ## Choosing an agent runtime
 
-You do not have to use Anthropic's API. `agent.runtime` picks one of three, and
-all three run under the same sandbox: no GitHub token in the agent's
-environment, no Bash tool, and the watched repo framed as untrusted data.
+You do not have to use Anthropic's API. `agent.runtime` picks one of three. All
+three work on a throwaway copy of the docs with no GitHub token, and only `.md`
+pages and `_category_.json` files are accepted back. The two built-in runtimes
+also run in Claude Code's restricted mode, with file tools only. A `custom`
+command is your own program: it runs with your permissions and gets none of the
+model secrets.
 
 ### `claude-code` — the built-in default
 

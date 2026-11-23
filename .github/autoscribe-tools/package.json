@@ -1,0 +1,8 @@
+{
+  "name": "autoscribe-tools",
+  "private": true,
+  "description": "The exact agent CLI the workflows run. Installed from this lockfile, so a new release reaches your API key only through a reviewed Dependabot PR.",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.330"
+  }
+}
