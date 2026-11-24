@@ -6,9 +6,9 @@ pull request from the **watched repo** and must decide whether that change creat
 a gap in the **Docusaurus Markdown docs** under `docs/`, then — if it does — make
 the smallest correct edit to close it.
 
-The docs are **local Markdown/MDX files** in this repo. There is no Confluence, no
+The docs are **local Markdown files** in this repo. There is no Confluence, no
 wiki, no external content store, and no custom review UI. When you change docs, you
-**edit/create files under `docs/`** (and update `sidebars.ts` / `_category_.json`
+**edit/create `.md` files under `docs/`** (and update `_category_.json`
 when you add a page), commit to the rolling draft branch, and let the **pull
 request** be the review surface. The owner reviews and merges.
 
@@ -40,7 +40,7 @@ If the diff is empty or unreadable, classify as `NO_GAP` with reasoning beginnin
    This is the **common, cheap** case — most code PRs do not change the docs.
 3. If a gap exists → **locate** the affected page(s) by searching `docs/`.
 4. **Edit or create** the Markdown to close the gap (smallest correct change),
-   updating `sidebars.ts` / `_category_.json` when you add a page.
+   updating `_category_.json` when you add a page.
 5. **Commit** to the rolling draft branch and update state.
 
 ## Step 1 — Classify (exactly one category)
@@ -136,10 +136,9 @@ Make the **smallest correct change** that closes the gap. Edit the files directl
   conventions; prefer examples drawn from the repo's own tests/examples.
 - **`NEW_PAGE`**: write a full page with front-matter (`title`, `sidebar_position`,
   optional `slug`/`description`), then **wire it into navigation** — add/adjust the
-  folder's `_category_.json` and, if the site uses an explicit `sidebars.ts`,
-  reference the new doc there so it actually appears.
+  folder's `_category_.json` so it actually appears.
 - **`STRUCTURAL`**: move/rename/retire pages and fix `_category_.json` /
-  `sidebars.ts` / `sidebar_position` so the tree matches the new reality. Fix
+  `sidebar_position` so the tree matches the new reality. Fix
   inbound links to any moved/removed page so the build doesn't break.
 - **`STYLE`**: apply the `editorial.md` rules to the affected prose — no factual
   change.
@@ -161,7 +160,7 @@ Make the **smallest correct change** that closes the gap. Edit the files directl
 - **Never leak source-control metadata into doc prose**: no PR numbers, branch
   names, ticket IDs, or "(updated in PR #…)" in the page body. Provenance belongs
   in the commit/PR and in `.autoscribe/state.json`, not in the published text.
-- Markdown/MDX only — don't emit raw HTML where Markdown suffices.
+- Markdown only, never `.mdx`, and don't emit raw HTML where Markdown suffices.
 
 ## Step 5 — Commit and record state
 

@@ -1,5 +1,6 @@
 # Dependencies
 /node_modules
+/.github/autoscribe-tools/node_modules
 
 # Deliberately NOT committed. The Pages/init workflows use `npm install`, not
 # `npm ci`, so no lockfile is required to build. Leaving it out means each tenant

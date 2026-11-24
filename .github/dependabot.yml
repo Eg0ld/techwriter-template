@@ -18,6 +18,15 @@ updates:
       # pin until Docusaurus ships a TS7-compatible tsconfig.
       - dependency-name: "typescript"
         versions: [">=7.0.0"]
+  # The exact agent CLI the workflows install (never auto-merged past a review
+  # of its major version).
+  - package-ecosystem: "npm"
+    directory: "/.github/autoscribe-tools"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 3
+      semver-major-days: 7
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
